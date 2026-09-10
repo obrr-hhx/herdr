@@ -1303,3 +1303,136 @@ fn resize_message_preserves_the_latest_surface_dimensions() {
         Some(crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 })
     );
 }
+
+#[test]
+fn failed_source_restoration_reconnects_instead_of_leaving_input_frozen() {
+    // Exercise the initial restore, its coherent-frame fence, and its host-effects fence.
+    for phase in 0..3 {
+        let (mut shell, mut endpoints, _, _) = shell_and_registry();
+        let mut activation = PendingEndpointActivation::begin(
+            &shell,
+            &mut endpoints,
+            endpoint(),
+            None,
+            resize(),
+            90,
+            Instant::now(),
+        )
+        .unwrap();
+        assert_eq!(
+            activation.rollback(&mut endpoints, "source release timed out".into(), false),
+            ActivationRollback::Pending
+        );
+        if phase > 0 {
+            let request_id = "client-shell-surface:90:rollback-source-on";
+            activation.receive_response(
+                &ClientEndpointId::Local,
+                1,
+                request_id,
+                &surface_success(request_id, true, 2),
+                &mut endpoints,
+            );
+            let snapshot = test_snapshot("local-boot", 2);
+            shell.set_snapshot(Box::new(snapshot.clone()));
+            activation.receive_snapshot(&ClientEndpointId::Local, 1, &snapshot);
+            assert_eq!(
+                activation.receive_surface(
+                    &ClientEndpointId::Local,
+                    1,
+                    surface("local-boot", 2, "pane")
+                ),
+                SurfaceActivationProgress::Ready
+            );
+            assert!(matches!(
+                activation.complete(&mut shell, &mut endpoints),
+                Ok(ActivationCompletion::AwaitingPresentationSync { .. })
+            ));
+        }
+        if phase > 1 {
+            let request_id = "client-shell-surface:90:presentation-sync";
+            activation.receive_response(
+                &ClientEndpointId::Local,
+                1,
+                request_id,
+                &surface_success(request_id, true, 3),
+                &mut endpoints,
+            );
+            let snapshot = test_snapshot("local-boot", 3);
+            shell.set_endpoint_snapshot_for_generation(
+                &ClientEndpointId::Local,
+                1,
+                Box::new(snapshot.clone()),
+            );
+            activation.receive_snapshot(&ClientEndpointId::Local, 1, &snapshot);
+            assert_eq!(
+                activation.receive_surface(
+                    &ClientEndpointId::Local,
+                    1,
+                    surface("local-boot", 3, "pane")
+                ),
+                SurfaceActivationProgress::Ready
+            );
+            assert_eq!(
+                activation.complete(&mut shell, &mut endpoints),
+                Ok(ActivationCompletion::AwaitingPresentationEffects)
+            );
+        }
+        assert!(!endpoints.active_surface_available());
+        assert!(matches!(
+            activation.rollback(&mut endpoints, "restore timed out".into(), false,),
+            ActivationRollback::Unavailable(_)
+        ));
+        assert!(
+            endpoints.connection(&ClientEndpointId::Local).is_none(),
+            "phase {phase}: the stalled source must be retired so the supervisor reconnects it"
+        );
+        assert!(
+            endpoints.connection(&endpoint()).is_some(),
+            "an unrelated remote connection must survive"
+        );
+        assert!(
+            !endpoints.active_surface_available(),
+            "input must remain gated until a new coherent activation completes"
+        );
+        let failures = endpoints.take_failures();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(failures[0].endpoint_id, ClientEndpointId::Local);
+        assert_eq!(failures[0].generation, 1);
+        assert!(failures[0].message.contains("restore timed out"));
+    }
+}
+
+#[test]
+fn failed_old_restoration_does_not_disconnect_a_new_source_generation() {
+    let (shell, mut endpoints, local_sent, _) = shell_and_registry();
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        endpoint(),
+        None,
+        resize(),
+        91,
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        activation.rollback(&mut endpoints, "source release timed out".into(), false),
+        ActivationRollback::Pending
+    );
+    endpoints.insert(
+        ClientEndpointId::Local,
+        FakeTransport {
+            sent: local_sent,
+            fail_after_write: false,
+        },
+        2,
+        negotiation(),
+        false,
+    );
+    assert!(matches!(
+        activation.rollback(&mut endpoints, "old restore timed out".into(), false),
+        ActivationRollback::Unavailable(_)
+    ));
+    assert!(endpoints.accepts(&ClientEndpointId::Local, 2));
+    assert!(endpoints.take_failures().is_empty());
+}

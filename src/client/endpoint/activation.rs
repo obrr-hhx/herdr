@@ -752,6 +752,12 @@ impl PendingEndpointActivation {
         error: String,
         source_release_rejected: bool,
     ) -> ActivationRollback {
+        tracing::warn!(
+            source = ?self.source.endpoint_id,
+            target = ?self.target.endpoint_id,
+            %error,
+            "endpoint activation rolling back"
+        );
         self.rollback_error = Some(error.clone());
         if matches!(self.phase, ActivationPhase::ReleasingSource { .. }) && source_release_rejected
         {
@@ -792,18 +798,20 @@ impl PendingEndpointActivation {
                 self.start_source_restore(endpoints, self.resize.clone())
             }
             ActivationPhase::RestoringSource { .. } => {
-                return ActivationRollback::Unavailable(format!(
-                    "{error}; source endpoint could not be restored"
-                ));
+                return self.fail_source_restoration(
+                    endpoints,
+                    format!("{error}; source endpoint could not be restored"),
+                );
             }
             ActivationPhase::SynchronizingPresentation { ref lease, .. }
             | ActivationPhase::AwaitingPresentationEffects { ref lease, .. } => {
                 if lease.endpoint_id == self.target.endpoint_id {
                     self.start_target_release(endpoints)
                 } else {
-                    return ActivationRollback::Unavailable(format!(
-                        "{error}; source endpoint presentation could not be synchronized"
-                    ));
+                    return self.fail_source_restoration(
+                        endpoints,
+                        format!("{error}; source endpoint presentation could not be synchronized"),
+                    );
                 }
             }
         };
@@ -813,6 +821,25 @@ impl PendingEndpointActivation {
                 "{error}; source endpoint could not be restored safely: {rollback_error}"
             )),
         }
+    }
+
+    fn fail_source_restoration(
+        &self,
+        endpoints: &mut EndpointRegistry,
+        message: String,
+    ) -> ActivationRollback {
+        // The caller drops this activation while keeping input frozen. A transport that is
+        // still connected would never retry (Local has no health probe); a partially restored
+        // surface can also remain marked active. Retire only this client's source connection
+        // so the supervisor obtains fresh metadata and a new presentation lease. The server
+        // and its pane processes are not stopped.
+        if endpoints.accepts(&self.source.endpoint_id, self.source.generation) {
+            endpoints.fail(
+                &self.source.endpoint_id,
+                std::io::Error::other(message.clone()),
+            );
+        }
+        ActivationRollback::Unavailable(message)
     }
 
     pub(crate) fn complete(
