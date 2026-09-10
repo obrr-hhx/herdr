@@ -1,3 +1,31 @@
+# Handson's Herdr fork
+
+An independent fork of [herdrdev/herdr](https://github.com/herdrdev/herdr), maintained
+by [@obrr-hhx](https://github.com/obrr-hhx). **Issues and pull requests are welcome
+from everyone**; see [CONTRIBUTING.md](CONTRIBUTING.md).
+
+This fork focuses first on client input and reconnect reliability. Published upstream
+versions and installation links below refer to upstream, not this fork. Install the
+build prerequisites in [CONTRIBUTING.md](CONTRIBUTING.md), then run:
+
+```bash
+git clone https://github.com/obrr-hhx/herdr.git
+cd herdr
+bash scripts/install-fork.sh
+```
+
+The installer builds a version identified by the fork commit, backs up any previous
+`~/.local/bin/herdr`, and replaces only the executable. It does not restart servers.
+On macOS, put Homebrew's `rustup` and `zig@0.15` bin directories on PATH first.
+To update, pull this fork and rerun the installer. Fork builds disable upstream
+self-update so they cannot silently replace the fork with an upstream release.
+
+Use isolated sessions for testing; stopping a server ends its running pane processes.
+
+The original Apache-2.0 license and upstream notices remain in place.
+
+---
+
 # herdr
 
 

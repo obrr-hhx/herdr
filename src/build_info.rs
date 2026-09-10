@@ -24,6 +24,10 @@ pub fn is_preview() -> bool {
     channel() == "preview"
 }
 
+pub fn is_community_fork() -> bool {
+    channel() == "obrr"
+}
+
 fn non_empty(value: Option<&'static str>) -> Option<&'static str> {
     value.and_then(|value| {
         let trimmed = value.trim();
