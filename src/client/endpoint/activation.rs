@@ -279,7 +279,7 @@ impl PendingEndpointActivation {
         let id = lease.endpoint_id.clone();
         let error = "endpoint presentation timed out".to_owned();
         if endpoints.accepts(&id, lease.generation) {
-            tracing::warn!(endpoint = ?id, phase = ?self.phase, "retiring unresponsive presentation connection");
+            tracing::warn!(endpoint = ?id, phase = self.phase.diagnostic_name(), "retiring unresponsive presentation connection");
             endpoints.fail(
                 &id,
                 std::io::Error::new(std::io::ErrorKind::TimedOut, error),
@@ -977,6 +977,8 @@ impl PendingEndpointActivation {
         resize: crate::protocol::ClientMessage,
     ) -> Result<(), String> {
         let request_id = format!("client-shell-surface:{}:on", self.epoch);
+        tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
+            "machine activation phase changed");
         self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
         // A transport may fail after writing any baseline or surface message. Enter the target
         // phase first so every uncertain target write is reversed through target-off before
@@ -1018,6 +1020,8 @@ impl PendingEndpointActivation {
             evidence: ActivationEvidence::default(),
             completion: Box::new(completion),
         };
+        tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
+            "machine activation phase changed");
         self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
         if endpoints.send_to(&lease.endpoint_id, &request) != EndpointSendOutcome::Sent {
             return Err("endpoint presentation synchronization could not be sent".into());
@@ -1038,6 +1042,8 @@ impl PendingEndpointActivation {
             ready: false,
             completion: Box::new(completion),
         };
+        tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
+            "machine activation phase changed");
         self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
         let message = crate::protocol::ClientMessage::EndpointControl {
             kind: crate::protocol::endpoint::PRESENTATION_EFFECTS_SYNC_KIND.into(),
@@ -1055,6 +1061,8 @@ impl PendingEndpointActivation {
             .map_err(|error| error.to_string())?;
         // Set the rollback phase before the potentially observed target-off write.
         self.phase = ActivationPhase::ReleasingTargetForRollback { request_id };
+        tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
+            "machine activation phase changed");
         self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
         if endpoints.send_to(&self.target.endpoint_id, &request) != EndpointSendOutcome::Sent {
             return Err("target endpoint release could not be sent".into());
@@ -1074,6 +1082,8 @@ impl PendingEndpointActivation {
             acknowledged_revision: None,
             evidence: ActivationEvidence::default(),
         };
+        tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
+            "machine activation phase changed");
         self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
         send_surface_activation(
             endpoints,

@@ -2,6 +2,7 @@ use super::*;
 
 pub(super) fn init_logging() {
     crate::logging::init_file_logging("herdr-client.log");
+    tracing::debug!(target: "herdr::client::diagnostics", "client mouse and handoff diagnostics enabled");
 }
 
 pub(super) fn apply_reload(

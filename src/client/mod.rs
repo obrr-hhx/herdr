@@ -1786,6 +1786,9 @@ async fn run_client_loop(
                         enabled,
                         sgr_pixels,
                     } => {
+                        tracing::debug!(target: "herdr::client::diagnostics", endpoint = ?endpoint_id,
+                            requested = enabled, sgr_pixels, local_preference = state.host_mouse_capture_preference(),
+                            frozen = state.presentation_frozen, "endpoint mouse mode received");
                         state.endpoint_mouse_capture_requested = enabled;
                         state.endpoint_sgr_pixels_requested = sgr_pixels;
                         let enabled =

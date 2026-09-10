@@ -100,6 +100,19 @@ pub(super) enum ActivationPhase {
     },
 }
 
+impl ActivationPhase {
+    pub(super) fn diagnostic_name(&self) -> &'static str {
+        match self {
+            Self::ReleasingSource { .. } => "releasing_source",
+            Self::ActivatingTarget { .. } => "activating_target",
+            Self::ReleasingTargetForRollback { .. } => "releasing_target_for_rollback",
+            Self::RestoringSource { .. } => "restoring_source",
+            Self::SynchronizingPresentation { .. } => "synchronizing_presentation",
+            Self::AwaitingPresentationEffects { .. } => "awaiting_presentation_effects",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SurfaceActivationProgress {
     Pending,

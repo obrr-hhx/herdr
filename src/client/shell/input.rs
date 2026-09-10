@@ -98,7 +98,10 @@ impl ClientShellState {
         let Some((x, y)) = crate::input::mouse::parse_report(data) else {
             return ClientShellInput::default();
         };
+        tracing::debug!(target: "herdr::client::diagnostics", x, y, geometry = ?geometry,
+            "pixel mouse report received");
         let Some((column, row)) = geometry.cell(x, y) else {
+            tracing::debug!(target: "herdr::client::diagnostics", "pixel mouse report rejected by geometry");
             return ClientShellInput::default();
         };
         let Some(cell_report) = crate::input::mouse::report_at_cell(data, column, row) else {
@@ -233,7 +236,14 @@ impl ClientShellState {
                         }
                     }
                 }
-                RawInputEvent::Mouse(mouse) => self.handle_mouse(mouse, &mut outcome),
+                RawInputEvent::Mouse(mouse) => {
+                    tracing::debug!(target: "herdr::client::diagnostics", kind = ?mouse.kind,
+                        column = mouse.column, row = mouse.row, overlay = self.overlay.is_some(),
+                        "mouse event received by client shell");
+                    self.handle_mouse(mouse, &mut outcome);
+                    tracing::debug!(target: "herdr::client::diagnostics", actions = outcome.actions.len(),
+                        repaint = outcome.repaint, "mouse event dispatched");
+                }
                 RawInputEvent::OuterFocusGained => {
                     self.outer_focused = Some(true);
                     outcome.query_host_appearance = true;
