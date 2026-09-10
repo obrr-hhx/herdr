@@ -404,6 +404,7 @@ async fn run_client_loop(
         repaint_pending: false,
         presentation_frozen: false,
         deferred_activation: None,
+        requested_activation: None,
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
@@ -710,6 +711,14 @@ async fn run_client_loop(
                 });
             }
         }
+        if let Some(intent) = state.requested_activation.take() {
+            state.deferred_activation = None;
+            scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
+                endpoint_id: intent.endpoint_id,
+                target: intent.target,
+                force: false,
+            });
+        }
         let immediate_event = scheduled_activation.take();
         #[cfg(windows)]
         let event = if let Some(event) = immediate_event {
@@ -813,7 +822,6 @@ async fn run_client_loop(
                         &mut pending_activation,
                         &mut endpoint_commands,
                         &mut prefix_input_source,
-                        &event_tx,
                     )? {
                         return Ok(());
                     }
@@ -977,7 +985,6 @@ async fn run_client_loop(
                         &mut pending_activation,
                         &mut endpoint_commands,
                         &mut prefix_input_source,
-                        &event_tx,
                     )? {
                         return Ok(());
                     }
@@ -1073,7 +1080,6 @@ async fn run_client_loop(
                         &mut pending_activation,
                         &mut endpoint_commands,
                         &mut prefix_input_source,
-                        &event_tx,
                     )? {
                         return Ok(());
                     }
@@ -1230,7 +1236,6 @@ async fn run_client_loop(
                     target,
                     force,
                     now,
-                    &event_tx,
                 )?;
             }
             ClientLoopEvent::ServerMessage {
@@ -1711,7 +1716,7 @@ async fn run_client_loop(
                             &mut write_stream,
                             state.shell.as_mut(),
                             &mut state.detached_process_children,
-                            &event_tx,
+                            &mut state.requested_activation,
                         )?;
                         let repaint = repaint || dispatch_repaint;
                         if replay_mouse.is_empty() {
@@ -1743,7 +1748,6 @@ async fn run_client_loop(
                                 &mut pending_activation,
                                 &mut endpoint_commands,
                                 &mut prefix_input_source,
-                                &event_tx,
                             )? {
                                 return Ok(());
                             }
@@ -1785,7 +1789,7 @@ async fn run_client_loop(
                         state.endpoint_mouse_capture_requested = enabled;
                         state.endpoint_sgr_pixels_requested = sgr_pixels;
                         let enabled =
-                            effective_mouse_capture(enabled, state.direct_mouse_capture_preference);
+                            effective_mouse_capture(enabled, state.host_mouse_capture_preference());
                         let next_sgr_pixels = effective_sgr_pixel_mouse(
                             enabled,
                             sgr_pixels,
@@ -2059,7 +2063,6 @@ async fn run_client_loop(
                         &mut pending_activation,
                         &mut endpoint_commands,
                         &mut prefix_input_source,
-                        &event_tx,
                     )? {
                         return Ok(());
                     }

@@ -55,6 +55,8 @@ When a connection is lost, the last workspace and agent state remains visible bu
 
 If a machine stops responding during a switch, Herdr retires that connection after the presentation deadline and continues with a healthy machine. It preserves your latest pending selection if recovery fails; pane input resumes only after the selected machine supplies a fresh, coherent screen. Temporary SSH proxy handshake failures retry automatically. With `remote.manage_ssh_config` enabled, background discovery and the bridge share a private SSH connection to reduce repeated connection setup.
 
+The sidebar keeps its local mouse capture even when a remote endpoint disables mouse reporting. Machine clicks are retained locally and take priority over queued transport events, so a busy remote connection cannot drop the latest selection.
+
 ## Rename, disable, or remove
 
 Read profile IDs from the list rather than deriving them from labels or hostnames:

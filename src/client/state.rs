@@ -38,6 +38,8 @@ pub(super) struct ClientState {
     /// During a source-off-first handoff the currently blitted frame remains authoritative until
     /// an acknowledged target snapshot/surface pair commits.
     pub(super) presentation_frozen: bool,
+    /// Client-owned selection, independent of the bounded transport event queue.
+    pub(super) requested_activation: Option<endpoint::EndpointActivationIntent>,
     /// Latest selection retained when an unavailable handoff is retired.
     pub(super) deferred_activation: Option<endpoint::EndpointActivationIntent>,
     pub(super) draw_host_cursor: bool,
@@ -59,6 +61,14 @@ impl Drop for ClientState {
 }
 
 impl ClientState {
+    pub(super) fn host_mouse_capture_preference(&self) -> bool {
+        if self.shell.is_some() {
+            self.shell_mouse_capture_preference
+        } else {
+            self.direct_mouse_capture_preference
+        }
+    }
+
     pub(super) fn request_repaint(&mut self) {
         self.repaint_pending = true;
     }

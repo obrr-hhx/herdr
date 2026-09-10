@@ -142,12 +142,34 @@ mod tests {
             repaint_pending: false,
             presentation_frozen: false,
             deferred_activation: None,
+            requested_activation: None,
             draw_host_cursor: false,
             detached_process_children: Vec::new(),
             shell: Some(shell::ClientShellState::new(
                 shell::ClientShellConfig::from_config(&crate::config::Config::default()),
             )),
         }
+    }
+
+    #[test]
+    fn remote_mouse_disable_cannot_disable_client_owned_sidebar() {
+        let mut client = state();
+        client.shell_mouse_capture_preference = true;
+        client.direct_mouse_capture_preference = false;
+        assert!(client.shell.is_some());
+        assert!(super::super::effective_mouse_capture(
+            false,
+            client.host_mouse_capture_preference()
+        ));
+        client.shell_mouse_capture_preference = false;
+        assert!(!super::super::effective_mouse_capture(
+            false,
+            client.host_mouse_capture_preference()
+        ));
+        assert!(super::super::effective_mouse_capture(
+            true,
+            client.host_mouse_capture_preference()
+        ));
     }
 
     #[test]

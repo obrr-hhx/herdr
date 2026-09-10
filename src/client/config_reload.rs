@@ -32,10 +32,10 @@ pub(super) fn apply_reload(
         )
         .map_err(ClientError::ConnectionLost)?;
     }
-    if state.attach_escape.is_some() {
+    if state.attach_escape.is_some() || state.shell.is_some() {
         let enabled = effective_mouse_capture(
             state.endpoint_mouse_capture_requested,
-            state.direct_mouse_capture_preference,
+            state.host_mouse_capture_preference(),
         );
         let sgr_pixels = effective_sgr_pixel_mouse(
             enabled,

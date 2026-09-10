@@ -272,14 +272,14 @@ fn dispatcher_cancels_worktree_requests_on_frozen_surface_or_failed_send() {
         );
         endpoints.set_surface_active(&ClientEndpointId::Local, fail_send);
         let mut commands = EndpointCommands::default();
-        let (tx, _rx) = tokio::sync::mpsc::channel(16);
+        let mut selection = None;
         let (replay, repaint) = crate::client::shell_runtime::dispatch_client_shell_actions(
             actions,
             &mut commands,
             &mut endpoints,
             Some(&mut state),
             &mut Vec::new(),
-            &tx,
+            &mut selection,
         )
         .unwrap();
         assert!(repaint);
@@ -447,4 +447,36 @@ fn another_machine_disconnect_does_not_cancel_active_popup() {
     state.mark_endpoint_disconnected(&remote);
     assert!(state.popup_pending);
     assert_eq!(state.pending_requests.len(), 1);
+}
+
+#[test]
+fn sidebar_selection_survives_frozen_transport_and_keeps_latest_click() {
+    use crate::client::endpoint::{EndpointNegotiation, EndpointRegistry, ProfileId};
+    use crate::client::endpoint_commands::EndpointCommands;
+    let mut endpoints = EndpointRegistry::new(
+        TestTransport { fail: true },
+        1,
+        EndpointNegotiation::default(),
+    );
+    endpoints.set_surface_active(&ClientEndpointId::Local, false);
+    let remote =
+        ClientEndpointId::Ssh(ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap());
+    let mut selection = None;
+    let mut commands = EndpointCommands::default();
+    for id in [remote, ClientEndpointId::Local] {
+        crate::client::shell_runtime::dispatch_client_shell_actions(
+            vec![ClientShellAction::ActivateEndpoint {
+                endpoint_id: id.clone(),
+                target: None,
+            }],
+            &mut commands,
+            &mut endpoints,
+            None,
+            &mut Vec::new(),
+            &mut selection,
+        )
+        .unwrap();
+        assert_eq!(selection.as_ref().unwrap().endpoint_id, id);
+    }
+    assert_eq!(selection.unwrap().endpoint_id, ClientEndpointId::Local);
 }

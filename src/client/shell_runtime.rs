@@ -6,7 +6,7 @@ pub(super) fn dispatch_client_shell_actions(
     endpoints: &mut endpoint::EndpointRegistry,
     mut shell: Option<&mut shell::ClientShellState>,
     detached_process_children: &mut Vec<std::process::Child>,
-    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
+    requested_activation: &mut Option<endpoint::EndpointActivationIntent>,
 ) -> Result<(Vec<crossterm::event::MouseEvent>, bool), ClientError> {
     let mut replay_mouse = Vec::new();
     let mut repaint = false;
@@ -32,10 +32,9 @@ pub(super) fn dispatch_client_shell_actions(
                 endpoint_id,
                 target,
             } => {
-                let _ = event_tx.try_send(ClientLoopEvent::ActivateEndpoint {
+                *requested_activation = Some(endpoint::EndpointActivationIntent {
                     endpoint_id,
                     target,
-                    force: false,
                 });
             }
             shell::ClientShellAction::OpenSafeWebUrl(url) => {
@@ -179,8 +178,8 @@ pub(super) fn begin_endpoint_activation(
     target: Option<shell::ClientEndpointFocusTarget>,
     force: bool,
     now: std::time::Instant,
-    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) -> Result<(), ClientError> {
+    tracing::info!(endpoint = ?endpoint_id, pending = pending.is_some(), "client requested machine switch");
     state.deferred_activation = None;
     if let Some(activation) = pending.as_mut() {
         if activation.can_retarget(&endpoint_id) {
@@ -216,7 +215,7 @@ pub(super) fn begin_endpoint_activation(
                 endpoints,
                 Some(shell),
                 &mut state.detached_process_children,
-                event_tx,
+                &mut state.requested_activation,
             )?;
             if repaint {
                 if let Some(frame) = shell.compose(state.reported_size.0, state.reported_size.1) {
@@ -647,7 +646,6 @@ pub(super) fn finish_client_shell_input(
     pending_activation: &mut Option<endpoint::PendingEndpointActivation>,
     endpoint_commands: &mut endpoint_commands::EndpointCommands,
     prefix_input_source: &mut impl crate::platform::PrefixInputSource,
-    event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) -> Result<bool, ClientError> {
     apply_client_shell_input_source_changes(state, prefix_input_source);
     if outcome.detach {
@@ -686,7 +684,7 @@ pub(super) fn finish_client_shell_input(
         endpoints,
         state.shell.as_mut(),
         &mut state.detached_process_children,
-        event_tx,
+        &mut state.requested_activation,
     )?;
     let frame = if dispatch_repaint {
         state
