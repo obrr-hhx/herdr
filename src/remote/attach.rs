@@ -548,13 +548,14 @@ impl RemoteSsh {
         }
     }
 
-    pub(super) fn new_noninteractive(target: String) -> Self {
-        Self {
+    pub(super) fn new_noninteractive(target: String, manage_ssh_config: bool) -> Self {
+        let mut ssh = Self::new(
             target,
-            session_name: crate::session::DEFAULT_SESSION_NAME.into(),
-            managed_config: None,
-            noninteractive: true,
-        }
+            manage_ssh_config,
+            crate::session::DEFAULT_SESSION_NAME.into(),
+        );
+        ssh.noninteractive = true;
+        ssh
     }
 
     fn target(&self) -> &str {
@@ -756,7 +757,12 @@ impl Drop for RemoteSsh {
             .managed_config
             .as_ref()
             .map(|config| &config.options)
-            .filter(|options| options.control_path.is_some())
+            .filter(|options| {
+                options
+                    .control_path
+                    .as_ref()
+                    .is_some_and(|path| path.exists())
+            })
         else {
             return;
         };
@@ -3140,7 +3146,7 @@ mod tests {
 
     #[test]
     fn noninteractive_ssh_command_cannot_prompt_or_accept_unknown_hosts() {
-        let ssh = RemoteSsh::new_noninteractive("example".into());
+        let ssh = RemoteSsh::new_noninteractive("example".into(), false);
         let args = ssh
             .command()
             .get_args()
@@ -3159,6 +3165,31 @@ mod tests {
         }
         assert!(!args.iter().any(|arg| arg == "-F"));
         assert!(ssh.options().is_none());
+    }
+
+    #[test]
+    fn noninteractive_managed_ssh_keeps_strict_auth_and_private_multiplexing() {
+        let ssh = RemoteSsh::new_noninteractive("example".into(), true);
+        let other = RemoteSsh::new_noninteractive("example".into(), true);
+        let options = ssh.options().expect("managed config");
+        assert_ne!(options.config_path, other.options().unwrap().config_path);
+        let args = ssh
+            .command()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        for required in [
+            "-F",
+            "BatchMode=yes",
+            "StrictHostKeyChecking=yes",
+            "NumberOfPasswordPrompts=0",
+        ] {
+            assert!(args.iter().any(|arg| arg == required));
+        }
+        if options.control_path.is_some() {
+            assert!(args.iter().any(|arg| arg == "ControlMaster=auto"));
+        }
+        assert!(options.config_path.is_file());
     }
 
     #[test]

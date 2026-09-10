@@ -717,7 +717,7 @@ fn source_release_rejection_restores_the_source_coherently() {
 }
 
 #[test]
-fn source_release_timeout_starts_an_acknowledged_source_restore() {
+fn source_release_rollback_starts_an_acknowledged_source_restore() {
     let (shell, mut endpoints, local_sent, _remote_sent) = shell_and_registry();
     let mut activation = PendingEndpointActivation::begin(
         &shell,
@@ -1433,6 +1433,129 @@ fn failed_old_restoration_does_not_disconnect_a_new_source_generation() {
         activation.rollback(&mut endpoints, "old restore timed out".into(), false),
         ActivationRollback::Unavailable(_)
     ));
+    assert!(endpoints.accepts(&ClientEndpointId::Local, 2));
+    assert!(endpoints.take_failures().is_empty());
+}
+
+#[test]
+fn silent_remote_source_is_retired_before_activating_healthy_local() {
+    let (shell, mut endpoints, local_sent, remote_sent) = shell_and_registry();
+    let remote = endpoint();
+    endpoints.set_surface_active(&remote, true);
+    assert!(endpoints.set_active(&remote));
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        ClientEndpointId::Local,
+        None,
+        resize(),
+        991,
+        Instant::now(),
+    )
+    .unwrap();
+    assert!(!endpoints.active_surface_available());
+    assert!(local_sent.lock().unwrap().is_empty());
+    assert_eq!(
+        activation.timed_out(&mut endpoints),
+        ActivationRollback::Pending
+    );
+    let failures = endpoints.take_failures();
+    assert_eq!(failures.len(), 1);
+    assert_eq!(failures[0].endpoint_id, remote);
+    assert_eq!(
+        activation.endpoint_disconnected(&mut endpoints, &remote, "timeout".into()),
+        ActivationRollback::Pending
+    );
+    assert!(matches!(
+        activation.phase,
+        ActivationPhase::ActivatingTarget { .. }
+    ));
+    assert!(local_sent
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|m| surface_set_active(m) == Some(true)));
+    assert!(
+        !remote_sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|m| surface_set_active(m) == Some(true)),
+        "never restore the timed-out source"
+    );
+    assert!(
+        !endpoints.active_surface_available(),
+        "input still waits for coherent Local evidence"
+    );
+}
+
+#[test]
+fn failed_restore_preserves_only_the_latest_successor() {
+    let (shell, mut endpoints, _, _) = shell_and_registry();
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        endpoint(),
+        None,
+        resize(),
+        992,
+        Instant::now(),
+    )
+    .unwrap();
+    assert_eq!(
+        activation.supersede(endpoint(), None, &mut endpoints),
+        ActivationRollback::Pending
+    );
+    assert_eq!(
+        activation.supersede(ClientEndpointId::Local, None, &mut endpoints),
+        ActivationRollback::Pending
+    );
+    assert_eq!(
+        activation.timed_out(&mut endpoints),
+        ActivationRollback::Pending
+    );
+    assert!(matches!(
+        activation.endpoint_disconnected(
+            &mut endpoints,
+            &ClientEndpointId::Local,
+            "timeout".into()
+        ),
+        ActivationRollback::Unavailable(_)
+    ));
+    assert_eq!(
+        activation.take_successor(),
+        Some(EndpointActivationIntent {
+            endpoint_id: ClientEndpointId::Local,
+            target: None
+        })
+    );
+    assert!(activation.take_successor().is_none());
+}
+
+#[test]
+fn timed_out_activation_does_not_retire_a_new_connection_generation() {
+    let (shell, mut endpoints, sent, _) = shell_and_registry();
+    let mut activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        endpoint(),
+        None,
+        resize(),
+        993,
+        Instant::now(),
+    )
+    .unwrap();
+    endpoints.insert(
+        ClientEndpointId::Local,
+        FakeTransport {
+            sent,
+            fail_after_write: false,
+        },
+        2,
+        negotiation(),
+        false,
+    );
+    activation.timed_out(&mut endpoints);
     assert!(endpoints.accepts(&ClientEndpointId::Local, 2));
     assert!(endpoints.take_failures().is_empty());
 }

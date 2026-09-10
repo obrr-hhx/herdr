@@ -141,10 +141,6 @@ impl PendingEndpointActivation {
         Ok(activation)
     }
 
-    pub(crate) fn target(&self) -> &ClientEndpointId {
-        &self.target.endpoint_id
-    }
-
     fn geometry(&self) -> crate::protocol::ClientSurfaceSize {
         resize_geometry(&self.resize).expect("activation resize was validated before construction")
     }
@@ -261,6 +257,36 @@ impl PendingEndpointActivation {
                 endpoint_matches(lease, endpoint_id, generation, boot_id) && expected == request_id
             }
             ActivationPhase::AwaitingPresentationEffects { .. } => false,
+        }
+    }
+
+    pub(crate) fn take_successor(&mut self) -> Option<EndpointActivationIntent> {
+        self.successor.take()
+    }
+
+    /// A deadline is transport failure, not a rejected operation. Retire the
+    /// unresponsive lease and let the normal disconnect event advance the handoff.
+    pub(crate) fn timed_out(&mut self, endpoints: &mut EndpointRegistry) -> ActivationRollback {
+        let lease = match &self.phase {
+            ActivationPhase::ReleasingSource { .. } | ActivationPhase::RestoringSource { .. } => {
+                &self.source
+            }
+            ActivationPhase::ActivatingTarget { .. }
+            | ActivationPhase::ReleasingTargetForRollback { .. } => &self.target,
+            ActivationPhase::SynchronizingPresentation { lease, .. }
+            | ActivationPhase::AwaitingPresentationEffects { lease, .. } => lease,
+        };
+        let id = lease.endpoint_id.clone();
+        let error = "endpoint presentation timed out".to_owned();
+        if endpoints.accepts(&id, lease.generation) {
+            tracing::warn!(endpoint = ?id, phase = ?self.phase, "retiring unresponsive presentation connection");
+            endpoints.fail(
+                &id,
+                std::io::Error::new(std::io::ErrorKind::TimedOut, error),
+            );
+            ActivationRollback::Pending
+        } else {
+            self.endpoint_disconnected(endpoints, &id, error)
         }
     }
 

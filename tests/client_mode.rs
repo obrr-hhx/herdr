@@ -681,6 +681,13 @@ fn read_output(output: &SharedOutput) -> String {
     output.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
+// Interpret cursor movement and incremental redraws before testing visible content.
+fn read_screen(output: &SharedOutput) -> String {
+    let mut parser = vt100::Parser::new(24, 80, 0);
+    parser.process(read_output(output).as_bytes());
+    parser.screen().contents()
+}
+
 /// Current captured byte length, used as a watermark so a test can search only
 /// the output emitted *after* a trigger. The teardown markers also appear in
 /// normal attach-phase output, so matching the whole buffer is meaningless.
@@ -830,6 +837,15 @@ fn federated_launch_opens_local_directly_while_saved_ssh_is_unavailable() {
 
 #[test]
 fn federated_client_starts_without_local_and_survives_its_restart() {
+    exercise_federated_recovery(false);
+}
+
+#[test]
+fn silent_remote_does_not_block_switching_to_local_after_one_deadline() {
+    exercise_federated_recovery(true);
+}
+
+fn exercise_federated_recovery(stall_remote: bool) {
     use std::os::unix::fs::PermissionsExt;
 
     let _lock = test_lock();
@@ -902,7 +918,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     let output = spawn_pty_drain(client._master.as_ref().unwrap().try_clone_reader().unwrap());
     assert!(
         wait_until(Duration::from_secs(12), Duration::from_millis(20), || {
-            read_output(&output).contains("REMOTE_INITIAL_FRAME")
+            read_screen(&output).contains("REMOTE_INITIAL_FRAME")
         }),
         "remote must be usable before Local exists: {}",
         read_output(&output)
@@ -919,23 +935,24 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         .to_string(),
     );
     assert_eq!(created["result"]["type"], "workspace_created");
-    assert!(wait_until(
-        Duration::from_secs(10),
-        Duration::from_millis(20),
-        || read_output(&output).contains("local-online")
-    ));
+    assert!(
+        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+            read_screen(&output).contains("local-online")
+        }),
+        "Local discovery output: {}",
+        read_output(&output)
+    );
 
     local.child.kill().unwrap();
     local.close_master();
     drop(local);
-    let watermark = output_len(&output);
     let mut input = client._master.as_ref().unwrap().take_writer().unwrap();
     input
         .write_all(b"printf 'REMOTE_%s\\n' SURVIVED\r")
         .unwrap();
     assert!(
         wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
-            read_output(&output)[watermark..].contains("REMOTE_SURVIVED")
+            read_screen(&output).contains("REMOTE_SURVIVED")
         }),
         "Local loss must not interrupt remote input or output"
     );
@@ -954,33 +971,47 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     assert_eq!(created["result"]["type"], "workspace_created");
     assert!(
         wait_until(Duration::from_secs(12), Duration::from_millis(20), || {
-            read_output(&output).contains("local-returned")
+            read_screen(&output).contains("local-returned")
         }),
         "Local must reconnect with fresh metadata"
     );
-    let watermark = output_len(&output);
     input
         .write_all(b"printf 'REMOTE_%s\\n' STILL_SELECTED\r")
         .unwrap();
     assert!(
         wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
-            read_output(&output)[watermark..].contains("REMOTE_STILL_SELECTED")
+            read_screen(&output).contains("REMOTE_STILL_SELECTED")
         }),
         "Local recovery must not steal selection"
     );
-    let watermark = output_len(&output);
-    remote_server.child.kill().unwrap();
-    assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
-            read_output(&output)[watermark..].contains("reconnecting")
-        }),
-        "the selected remote must be marked disconnected"
-    );
-    let text = read_output(&output);
-    assert!(
-        text.rfind("\x1b[?1000h") > text.rfind("\x1b[?1000l"),
-        "losing the selected remote must keep host mouse reporting enabled"
-    );
+    let remote_pid = remote_server.child.process_id().unwrap() as libc::pid_t;
+    struct ResumeOnDrop(libc::pid_t);
+    impl Drop for ResumeOnDrop {
+        fn drop(&mut self) {
+            // Only this disposable test server is ever stopped.
+            unsafe {
+                libc::kill(self.0, libc::SIGCONT);
+            }
+        }
+    }
+    let resume = if stall_remote {
+        assert_eq!(unsafe { libc::kill(remote_pid, libc::SIGSTOP) }, 0);
+        Some(ResumeOnDrop(remote_pid))
+    } else {
+        remote_server.child.kill().unwrap();
+        assert!(
+            wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
+                read_screen(&output).contains("reconnecting")
+            }),
+            "the selected remote must be marked disconnected"
+        );
+        let text = read_output(&output);
+        assert!(
+            text.rfind("\x1b[?1000h") > text.rfind("\x1b[?1000l"),
+            "remote loss must keep host mouse reporting enabled"
+        );
+        None
+    };
 
     let local_pane = created["result"]["root_pane"]["pane_id"].as_str().unwrap();
     send_pane_shell_command(
@@ -988,12 +1019,18 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         local_pane,
         "printf 'LOCAL_RECOVERED_SURFACE\\n'",
     );
-    let watermark = output_len(&output);
     // Select the fresh workspace below Local's restored workspace.
-    input.write_all(b"\x1b[<0;7;5M\x1b[<0;7;5m").unwrap();
+    let row = read_screen(&output)
+        .lines()
+        .position(|line| line.contains("local-returned"))
+        .expect("Local workspace is visible")
+        + 1;
+    input
+        .write_all(format!("\x1b[<0;7;{row}M\x1b[<0;7;{row}m").as_bytes())
+        .unwrap();
     assert!(
-        wait_until(Duration::from_secs(10), Duration::from_millis(20), || {
-            read_output(&output)[watermark..].contains("LOCAL_RECOVERED_SURFACE")
+        wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
+            read_screen(&output).contains("LOCAL_RECOVERED_SURFACE")
         }),
         "recovered Local must be selectable: {}",
         read_output(&output)
@@ -1001,7 +1038,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
     // A coherent frame precedes the final host-effects fence; input stays gated until then.
     assert!(
         wait_until(Duration::from_secs(8), Duration::from_millis(100), || {
-            if read_output(&output)[watermark..].contains("LOCAL_INPUT_RECOVERED") {
+            if read_screen(&output).contains("LOCAL_INPUT_RECOVERED") {
                 return true;
             }
             input
@@ -1012,6 +1049,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
         "recovered Local must accept input: {}",
         read_output(&output)
     );
+    drop(resume);
     drop(input);
     drop(client);
     drop(restarted);

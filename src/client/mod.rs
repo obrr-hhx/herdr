@@ -403,6 +403,7 @@ async fn run_client_loop(
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         repaint_pending: false,
         presentation_frozen: false,
+        deferred_activation: None,
         draw_host_cursor,
         detached_process_children: Vec::new(),
         shell: config.shell_config.map(shell::ClientShellState::new),
@@ -682,6 +683,33 @@ async fn run_client_loop(
                 shell.timer_delay(std::time::Instant::now())
             });
         let timer_deadline = client_timer.deadline(std::time::Instant::now(), timer_delay);
+        if pending_activation.is_none() && scheduled_activation.is_none() {
+            let ready = state.deferred_activation.as_ref().is_some_and(|intent| {
+                write_stream
+                    .connection(&intent.endpoint_id)
+                    .is_some_and(|connection| {
+                        state.shell.as_ref().is_some_and(|shell| {
+                            shell
+                                .endpoint_snapshot_identity(
+                                    &intent.endpoint_id,
+                                    connection.generation,
+                                )
+                                .is_some()
+                        })
+                    })
+            });
+            if ready {
+                let intent = state
+                    .deferred_activation
+                    .take()
+                    .expect("checked deferred selection");
+                scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
+                    endpoint_id: intent.endpoint_id,
+                    target: intent.target,
+                    force: true,
+                });
+            }
+        }
         let immediate_event = scheduled_activation.take();
         #[cfg(windows)]
         let event = if let Some(event) = immediate_event {
@@ -1905,7 +1933,11 @@ async fn run_client_loop(
                         let needs_surface = write_stream
                             .connection(&selected_endpoint)
                             .is_some_and(|connection| !connection.surface_active);
-                        if activation_ready && needs_surface && pending_activation.is_none() {
+                        if activation_ready
+                            && needs_surface
+                            && pending_activation.is_none()
+                            && state.deferred_activation.is_none()
+                        {
                             scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
                                 endpoint_id: selected_endpoint,
                                 target: None,
@@ -1981,21 +2013,10 @@ async fn run_client_loop(
                     .as_ref()
                     .is_some_and(|activation| activation.expired(now))
                 {
-                    let endpoint_id = pending_activation
-                        .as_ref()
-                        .map(|activation| activation.target().clone())
-                        .expect("checked pending activation");
-                    let label = state
-                        .shell
-                        .as_ref()
-                        .map(|shell| shell.endpoint_label(&endpoint_id).to_owned())
-                        .unwrap_or_else(|| "Endpoint".into());
-                    rollback_endpoint_activation(
+                    timeout_endpoint_activation(
                         &mut state,
                         &mut write_stream,
                         &mut pending_activation,
-                        format!("{label} did not produce a coherent surface in time"),
-                        false,
                     );
                 }
                 if state.shell.is_some() {

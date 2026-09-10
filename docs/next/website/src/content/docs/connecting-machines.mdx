@@ -53,6 +53,8 @@ Local opens immediately on startup without waiting for SSH connections. A stalle
 
 When a connection is lost, the last workspace and agent state remains visible but dimmed. That is cached information, not live state. Input and navigation into those cached panes stay disabled until a fresh connection and matching screen arrive. Reconnecting never takes selection away from the machine you are using.
 
+If a machine stops responding during a switch, Herdr retires that connection after the presentation deadline and continues with a healthy machine. It preserves your latest pending selection if recovery fails; pane input resumes only after the selected machine supplies a fresh, coherent screen. Temporary SSH proxy handshake failures retry automatically. With `remote.manage_ssh_config` enabled, background discovery and the bridge share a private SSH connection to reduce repeated connection setup.
+
 ## Rename, disable, or remove
 
 Read profile IDs from the list rather than deriving them from labels or hostnames:

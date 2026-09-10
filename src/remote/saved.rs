@@ -5,6 +5,8 @@ use super::attach::{find_installed_remote_herdr, RemoteSsh, SshStdioBridge};
 
 pub(crate) struct SavedSshBridge {
     _bridge: SshStdioBridge,
+    // Keep the private SSH master and config alive until its bridge stops.
+    _ssh: RemoteSsh,
 }
 
 pub(crate) struct SavedSshStream {
@@ -20,7 +22,13 @@ pub(crate) fn connect_saved_ssh(
     validate_profile_path_id(profile_id)?;
     crate::session::validate_name(session)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
-    let ssh = RemoteSsh::new_noninteractive(target.to_owned());
+    let ssh = RemoteSsh::new_noninteractive(
+        target.to_owned(),
+        crate::config::Config::load()
+            .config
+            .remote
+            .manage_ssh_config,
+    );
     let remote_herdr = find_installed_remote_herdr(&ssh)?;
     let path = saved_bridge_path(profile_id);
     let bridge = SshStdioBridge::start(
@@ -34,7 +42,10 @@ pub(crate) fn connect_saved_ssh(
     let stream = crate::ipc::connect_local_stream(&path)?;
     Ok(SavedSshStream {
         stream,
-        bridge: SavedSshBridge { _bridge: bridge },
+        bridge: SavedSshBridge {
+            _bridge: bridge,
+            _ssh: ssh,
+        },
     })
 }
 
@@ -60,6 +71,9 @@ pub(crate) fn saved_ssh_failure_needs_attention(error: &io::Error) -> bool {
     let message = error.to_string().to_ascii_lowercase();
     [
         "permission denied",
+        "authentication failed",
+        "unauthorized",
+        "invalid token",
         "host key verification failed",
         "remote host identification has changed",
         "no matching host key",
@@ -67,7 +81,9 @@ pub(crate) fn saved_ssh_failure_needs_attention(error: &io::Error) -> bool {
         "not ready",
         "install or update",
         "protocol",
-        "handshake",
+        // SSH proxies also report transient HTTP failures as a "bad handshake".
+        // Only an explicit rejection requires setup; transport failures retry.
+        "handshake rejected",
     ]
     .iter()
     .any(|needle| message.contains(needle))
@@ -117,6 +133,34 @@ mod tests {
     }
 
     #[test]
+    fn transient_proxy_handshake_failures_retry() {
+        for message in [
+            "remote platform detection failed: connect: websocket: bad handshake (no healthy upstream)",
+            "remote platform detection failed: connect: websocket: bad handshake (503 Service Unavailable)",
+            "SSH handshake timed out",
+        ] {
+            assert!(
+                !saved_ssh_failure_needs_attention(&io::Error::other(message)),
+                "transient failure should retry: {message}",
+            );
+        }
+    }
+
+    #[test]
+    fn proxy_authentication_failures_require_attention() {
+        for message in [
+            "connect: websocket: bad handshake (invalid token)",
+            "SSH proxy: unauthorized",
+            "SSH proxy: authentication failed",
+        ] {
+            assert!(
+                saved_ssh_failure_needs_attention(&io::Error::other(message)),
+                "authentication failure needs attention: {message}",
+            );
+        }
+    }
+
+    #[test]
     fn prompt_and_compatibility_failures_require_attention() {
         for message in [
             "Permission denied (publickey)",
@@ -132,5 +176,20 @@ mod tests {
             io::ErrorKind::TimedOut,
             "network timed out"
         )));
+    }
+    #[test]
+    #[ignore = "requires an explicitly provided SSH target and disposable remote session"]
+    fn saved_ssh_probe_on_disposable_remote_session() {
+        let target = std::env::var("HERDR_TEST_SSH_TARGET").expect("explicit test target");
+        let session = std::env::var("HERDR_TEST_SSH_SESSION").expect("disposable test session");
+        assert!(session.starts_with("herdr-test-"));
+        let started = std::time::Instant::now();
+        let mut connection =
+            connect_saved_ssh("fedcba9876543210fedcba9876543210", &target, &session).unwrap();
+        let negotiation =
+            crate::client::probe_endpoint_negotiation(&mut connection.stream).unwrap();
+        assert!(negotiation.supports_surface_interest());
+        eprintln!("saved SSH ready in {:.3}s", started.elapsed().as_secs_f64());
+        drop(connection);
     }
 }

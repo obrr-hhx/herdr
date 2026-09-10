@@ -181,6 +181,7 @@ pub(super) fn begin_endpoint_activation(
     now: std::time::Instant,
     event_tx: &tokio::sync::mpsc::Sender<ClientLoopEvent>,
 ) -> Result<(), ClientError> {
+    state.deferred_activation = None;
     if let Some(activation) = pending.as_mut() {
         if activation.can_retarget(&endpoint_id) {
             let retarget_error = activation.retarget(target, endpoints).err();
@@ -192,6 +193,9 @@ pub(super) fn begin_endpoint_activation(
             // replaces the retained successor instead of mutating the transaction being retired.
             let outcome = activation.supersede(endpoint_id, target, endpoints);
             if let endpoint::ActivationRollback::Unavailable(message) = outcome {
+                state.deferred_activation = pending
+                    .as_mut()
+                    .and_then(endpoint::PendingEndpointActivation::take_successor);
                 *pending = None;
                 present_handoff_unavailable(state, message);
             }
@@ -411,6 +415,21 @@ pub(super) fn present_handoff_unavailable(state: &mut ClientState, message: Stri
     }
 }
 
+pub(super) fn timeout_endpoint_activation(
+    state: &mut ClientState,
+    endpoints: &mut endpoint::EndpointRegistry,
+    pending: &mut Option<endpoint::PendingEndpointActivation>,
+) {
+    let Some(activation) = pending.as_mut() else {
+        return;
+    };
+    if let endpoint::ActivationRollback::Unavailable(message) = activation.timed_out(endpoints) {
+        state.deferred_activation = activation.take_successor();
+        *pending = None;
+        present_handoff_unavailable(state, message);
+    }
+}
+
 pub(super) fn rollback_endpoint_activation(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,
@@ -424,6 +443,9 @@ pub(super) fn rollback_endpoint_activation(
     match activation.rollback(endpoints, error.clone(), source_release_rejected) {
         endpoint::ActivationRollback::Pending => state.freeze_presentation(),
         endpoint::ActivationRollback::Unavailable(message) => {
+            state.deferred_activation = pending
+                .as_mut()
+                .and_then(endpoint::PendingEndpointActivation::take_successor);
             *pending = None;
             // No endpoint has been proven safe to present. Keep pane input frozen, but render
             // the client-owned unavailable chrome rather than silently swallowing the error.
@@ -461,6 +483,9 @@ pub(super) fn handle_endpoint_disconnect(
         match outcome {
             endpoint::ActivationRollback::Pending => {}
             endpoint::ActivationRollback::Unavailable(error) => {
+                state.deferred_activation = pending_activation
+                    .as_mut()
+                    .and_then(endpoint::PendingEndpointActivation::take_successor);
                 *pending_activation = None;
                 present_handoff_unavailable(state, error);
             }
@@ -520,6 +545,9 @@ pub(super) fn handle_endpoint_attention(
                 "endpoint reported attention while activating".into(),
             );
         if let endpoint::ActivationRollback::Unavailable(error) = outcome {
+            state.deferred_activation = pending_activation
+                .as_mut()
+                .and_then(endpoint::PendingEndpointActivation::take_successor);
             *pending_activation = None;
             present_handoff_unavailable(state, error);
         }

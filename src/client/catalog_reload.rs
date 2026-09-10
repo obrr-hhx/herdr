@@ -141,6 +141,7 @@ mod tests {
             redraw_on_focus_gained: false,
             repaint_pending: false,
             presentation_frozen: false,
+            deferred_activation: None,
             draw_host_cursor: false,
             detached_process_children: Vec::new(),
             shell: Some(shell::ClientShellState::new(
