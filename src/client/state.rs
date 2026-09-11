@@ -35,13 +35,11 @@ pub(super) struct ClientState {
         Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     pub(super) redraw_on_focus_gained: bool,
     pub(super) repaint_pending: bool,
-    /// During a source-off-first handoff the currently blitted frame remains authoritative until
+    /// During a machine handoff the currently blitted frame remains authoritative until
     /// an acknowledged target snapshot/surface pair commits.
     pub(super) presentation_frozen: bool,
     /// Client-owned selection, independent of the bounded transport event queue.
     pub(super) requested_activation: Option<endpoint::EndpointActivationIntent>,
-    /// Latest selection retained when an unavailable handoff is retired.
-    pub(super) deferred_activation: Option<endpoint::EndpointActivationIntent>,
     pub(super) draw_host_cursor: bool,
     pub(super) detached_process_children: Vec<std::process::Child>,
     pub(super) shell: Option<shell::ClientShellState>,

@@ -120,6 +120,7 @@ pub(super) fn send_surface_activation(
     resize: &crate::protocol::ClientMessage,
     focused: bool,
 ) -> Result<(), String> {
+    endpoints.cancel_surface_release(&target.endpoint_id);
     if endpoints.send_to(&target.endpoint_id, resize) != EndpointSendOutcome::Sent {
         return Err("endpoint resize could not be sent".into());
     }

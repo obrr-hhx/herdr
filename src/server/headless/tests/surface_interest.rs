@@ -449,8 +449,9 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
     )
     .unwrap();
 
-    // Route the source-off-first client messages through a second real HeadlessServer. Its
-    // typed response is the only source acknowledgement supplied to the activation state.
+    // The target is already being activated before the old server processes its release.
+    assert!(!target_sent.lock().unwrap().is_empty());
+    // Route the old server's acknowledgement through independent background cleanup.
     let mut source_release_request_id = None;
     for message in std::mem::take(&mut *source_sent.lock().unwrap()) {
         match message {
@@ -484,12 +485,14 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
         }
     }
     let source_release_request_id = source_release_request_id.expect("client source-off request");
-    let source_release_data = loop {
+    let source_release_response = loop {
         let message = read_server_message(source_control.recv().expect("source typed release ack"));
-        match message {
-            ServerMessage::ClientShellEndpointResponseChunk {
-                request_id, data, ..
-            } if request_id == source_release_request_id => break data,
+        match &message {
+            ServerMessage::ClientShellEndpointResponseChunk { request_id, .. }
+                if request_id == &source_release_request_id =>
+            {
+                break message
+            }
             ServerMessage::EndpointControl { .. }
             | ServerMessage::MouseCapture { .. }
             | ServerMessage::ClientShellKeyboardReportAll { .. }
@@ -498,16 +501,11 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
             other => panic!("unexpected source release message: {other:?}"),
         }
     };
-    assert_eq!(
-        activation.receive_response(
-            &ClientEndpointId::Local,
-            1,
-            &source_release_request_id,
-            &source_release_data,
-            &mut endpoints,
-        ),
-        crate::client::endpoint::SurfaceActivationProgress::Pending
-    );
+    assert!(endpoints.receive_surface_release(
+        &ClientEndpointId::Local,
+        1,
+        &source_release_response
+    ));
 
     dispatch_lifecycle_messages(
         &mut target_server,

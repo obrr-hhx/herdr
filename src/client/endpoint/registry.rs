@@ -59,12 +59,19 @@ impl EndpointNegotiation {
     }
 }
 
+struct PendingSurfaceRelease {
+    boot_id: String,
+    request_id: String,
+    deadline: Instant,
+}
+
 pub(crate) struct EndpointConnection {
     transport: Box<dyn EndpointTransport>,
     pub(crate) generation: u64,
     pub(crate) surface_active: bool,
     pub(crate) negotiation: EndpointNegotiation,
     health: Option<EndpointHealth>,
+    surface_release: Option<PendingSurfaceRelease>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,6 +169,7 @@ impl EndpointRegistry {
                 surface_active,
                 negotiation,
                 health,
+                surface_release: None,
             },
         ) {
             previous.transport.disconnect();
@@ -201,7 +209,88 @@ impl EndpointRegistry {
         }
     }
 
+    pub(crate) fn track_surface_release(
+        &mut self,
+        id: &ClientEndpointId,
+        boot_id: String,
+        request_id: String,
+        deadline: Instant,
+    ) {
+        if let Some(connection) = self.connections.get_mut(id) {
+            connection.surface_release = Some(PendingSurfaceRelease {
+                boot_id,
+                request_id,
+                deadline,
+            });
+        }
+    }
+
+    pub(crate) fn cancel_surface_release(&mut self, id: &ClientEndpointId) {
+        if let Some(connection) = self.connections.get_mut(id) {
+            connection.surface_release = None;
+        }
+    }
+
+    pub(crate) fn receive_surface_release(
+        &mut self,
+        id: &ClientEndpointId,
+        generation: u64,
+        message: &crate::protocol::ServerMessage,
+    ) -> bool {
+        let crate::protocol::ServerMessage::ClientShellEndpointResponseChunk {
+            boot_id,
+            request_id,
+            final_chunk,
+            data,
+        } = message
+        else {
+            return false;
+        };
+        let matched = self
+            .connections
+            .get(id)
+            .filter(|c| c.generation == generation)
+            .and_then(|c| c.surface_release.as_ref())
+            .is_some_and(|pending| {
+                pending.boot_id == *boot_id && pending.request_id == *request_id
+            });
+        if !matched {
+            return false;
+        }
+        self.cancel_surface_release(id);
+        if !final_chunk || !super::activation::valid_surface_release(request_id, data) {
+            self.fail(
+                id,
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "background surface release rejected",
+                ),
+            );
+        }
+        true
+    }
+
     pub(crate) fn tick_health(&mut self, now: Instant) {
+        let expired = self
+            .connections
+            .iter()
+            .filter(|(_, connection)| {
+                connection
+                    .surface_release
+                    .as_ref()
+                    .is_some_and(|release| now >= release.deadline)
+            })
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in expired {
+            self.fail(
+                &id,
+                io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "background surface release timed out",
+                ),
+            );
+        }
         let actions = self
             .connections
             .iter()

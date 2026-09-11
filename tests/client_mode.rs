@@ -841,7 +841,7 @@ fn federated_client_starts_without_local_and_survives_its_restart() {
 }
 
 #[test]
-fn silent_remote_does_not_block_switching_to_local_after_one_deadline() {
+fn silent_remote_does_not_delay_switching_to_local() {
     exercise_federated_recovery(true);
 }
 
@@ -1029,7 +1029,7 @@ fn exercise_federated_recovery(stall_remote: bool) {
         .write_all(format!("\x1b[<0;7;{row}M\x1b[<0;7;{row}m").as_bytes())
         .unwrap();
     assert!(
-        wait_until(Duration::from_secs(8), Duration::from_millis(20), || {
+        wait_until(Duration::from_secs(2), Duration::from_millis(20), || {
             read_screen(&output).contains("LOCAL_RECOVERED_SURFACE")
         }),
         "recovered Local must be selectable: {}",

@@ -55,7 +55,7 @@ pub(super) fn dispatch_client_shell_actions(
             }
         }
     }
-    // A source-off-first handoff leaves the registry's committed identity pointing at a
+    // A handoff leaves the registry's committed identity pointing at a
     // deliberately surface-inactive source. Do not drain its retained queue into a server that
     // must reject it; completion below resumes the committed owner's lane.
     if endpoints.active_surface_available() {
@@ -180,7 +180,6 @@ pub(super) fn begin_endpoint_activation(
     now: std::time::Instant,
 ) -> Result<(), ClientError> {
     tracing::info!(endpoint = ?endpoint_id, pending = pending.is_some(), "client requested machine switch");
-    state.deferred_activation = None;
     if let Some(activation) = pending.as_mut() {
         if activation.can_retarget(&endpoint_id) {
             let retarget_error = activation.retarget(target, endpoints).err();
@@ -188,16 +187,8 @@ pub(super) fn begin_endpoint_activation(
                 rollback_endpoint_activation(state, endpoints, pending, error, false);
             }
         } else {
-            // Once rollback starts, even a request for the original target is a new intent. It
-            // replaces the retained successor instead of mutating the transaction being retired.
-            let outcome = activation.supersede(endpoint_id, target, endpoints);
-            if let endpoint::ActivationRollback::Unavailable(message) = outcome {
-                state.deferred_activation = pending
-                    .as_mut()
-                    .and_then(endpoint::PendingEndpointActivation::take_successor);
-                *pending = None;
-                present_handoff_unavailable(state, message);
-            }
+            state.requested_activation = Some(activation.supersede(endpoint_id, target, endpoints));
+            *pending = None;
         }
         return Ok(());
     }
@@ -353,31 +344,17 @@ pub(super) fn complete_endpoint_activation(
 
     let _ = pending.take();
     endpoints.unfreeze_input();
-    let successor = match completion {
-        endpoint::ActivationCompletion::RestoredSource {
-            error,
-            successor: next,
-            ..
-        } => {
-            if next.is_none() {
-                if let Some(shell) = state.shell.as_mut() {
-                    shell.receive_endpoint_unavailable(error);
-                }
-            }
-            next
-        }
-        endpoint::ActivationCompletion::Activated => None,
-        endpoint::ActivationCompletion::AwaitingPresentationSync { .. }
-        | endpoint::ActivationCompletion::AwaitingPresentationEffects => unreachable!(),
-    };
-    state.unfreeze_presentation();
-    if successor.is_none() {
-        let active_endpoint = endpoints.active_id().clone();
-        let cancelled = endpoint_commands.send_next(&active_endpoint, endpoints);
+    if let endpoint::ActivationCompletion::RestoredSource { error } = completion {
         if let Some(shell) = state.shell.as_mut() {
-            for request_id in cancelled {
-                shell.cancel_endpoint_request(&request_id);
-            }
+            shell.receive_endpoint_unavailable(error);
+        }
+    }
+    state.unfreeze_presentation();
+    let active_endpoint = endpoints.active_id().clone();
+    let cancelled = endpoint_commands.send_next(&active_endpoint, endpoints);
+    if let Some(shell) = state.shell.as_mut() {
+        for request_id in cancelled {
+            shell.cancel_endpoint_request(&request_id);
         }
     }
     let (cleanup, frame) = {
@@ -390,13 +367,6 @@ pub(super) fn complete_endpoint_activation(
     state.present_graphics(&cleanup);
     if let Some(frame) = frame {
         state.present_frame(frame);
-    }
-    if let Some(intent) = successor {
-        return Ok(Some(ClientLoopEvent::ActivateEndpoint {
-            endpoint_id: intent.endpoint_id,
-            target: intent.target,
-            force: true,
-        }));
     }
     Ok(None)
 }
@@ -423,7 +393,6 @@ pub(super) fn timeout_endpoint_activation(
         return;
     };
     if let endpoint::ActivationRollback::Unavailable(message) = activation.timed_out(endpoints) {
-        state.deferred_activation = activation.take_successor();
         *pending = None;
         present_handoff_unavailable(state, message);
     }
@@ -442,9 +411,6 @@ pub(super) fn rollback_endpoint_activation(
     match activation.rollback(endpoints, error.clone(), source_release_rejected) {
         endpoint::ActivationRollback::Pending => state.freeze_presentation(),
         endpoint::ActivationRollback::Unavailable(message) => {
-            state.deferred_activation = pending
-                .as_mut()
-                .and_then(endpoint::PendingEndpointActivation::take_successor);
             *pending = None;
             // No endpoint has been proven safe to present. Keep pane input frozen, but render
             // the client-owned unavailable chrome rather than silently swallowing the error.
@@ -482,9 +448,6 @@ pub(super) fn handle_endpoint_disconnect(
         match outcome {
             endpoint::ActivationRollback::Pending => {}
             endpoint::ActivationRollback::Unavailable(error) => {
-                state.deferred_activation = pending_activation
-                    .as_mut()
-                    .and_then(endpoint::PendingEndpointActivation::take_successor);
                 *pending_activation = None;
                 present_handoff_unavailable(state, error);
             }
@@ -544,9 +507,6 @@ pub(super) fn handle_endpoint_attention(
                 "endpoint reported attention while activating".into(),
             );
         if let endpoint::ActivationRollback::Unavailable(error) = outcome {
-            state.deferred_activation = pending_activation
-                .as_mut()
-                .and_then(endpoint::PendingEndpointActivation::take_successor);
             *pending_activation = None;
             present_handoff_unavailable(state, error);
         }

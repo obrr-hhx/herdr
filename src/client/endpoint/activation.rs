@@ -13,6 +13,12 @@ use protocol::*;
 
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
 
+pub(super) fn valid_surface_release(request_id: &str, data: &[u8]) -> bool {
+    decode_endpoint_response(request_id, data)
+        .ok()
+        .is_some_and(|result| surface_set_revision(&result, false).is_ok())
+}
+
 impl PendingEndpointActivation {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn begin(
@@ -100,43 +106,35 @@ impl PendingEndpointActivation {
             epoch: serial,
             next_focus_serial: 0,
             rollback_error: None,
-            successor: None,
         };
 
-        // Reconnecting the selected endpoint has no live source surface to release. All normal
-        // handoffs must make the source locally inactive before a target request is even sent.
-        if source_is_target || !source_available {
-            if let Err(error) = activation.start_target(endpoints, resize) {
-                return Err(ActivationBeginError::Partial {
-                    activation: Box::new(activation),
-                    error,
-                });
-            }
-        } else {
-            // `surface.set(false)` removes the viewer, but old servers only emit the PTY focus
-            // loss while the viewer is still active. Revoke it explicitly before source-off.
-            if endpoints.send_to(
+        // Revoke local presentation immediately. Remote release is background cleanup:
+        // the old endpoint must never gate activation of another machine.
+        if !source_is_target && source_available {
+            endpoints.set_surface_active(&activation.source.endpoint_id, false);
+            let focus_sent = endpoints.send_to(
                 &activation.source.endpoint_id,
                 &crate::protocol::ClientMessage::ClientShellFocus { focused: false },
-            ) != EndpointSendOutcome::Sent
-            {
-                return Err(ActivationBeginError::Partial {
-                    activation: Box::new(activation),
-                    error: "source endpoint focus revoke could not be sent".into(),
-                });
-            }
+            );
             let request = source_release_request.expect("validated source release request");
-            if endpoints.send_to(&activation.source.endpoint_id, &request)
-                != EndpointSendOutcome::Sent
+            let release_sent = endpoints.send_to(&activation.source.endpoint_id, &request);
+            if focus_sent == EndpointSendOutcome::Sent && release_sent == EndpointSendOutcome::Sent
             {
-                return Err(ActivationBeginError::Partial {
-                    activation: Box::new(activation),
-                    error: "source endpoint release could not be sent".into(),
-                });
+                endpoints.track_surface_release(
+                    &activation.source.endpoint_id,
+                    activation.source.boot_id.clone(),
+                    format!("client-shell-surface:{serial}:off"),
+                    now + ACTIVATION_TIMEOUT,
+                );
+            } else {
+                activation.source_available = false;
             }
-            // This is deliberately before the acknowledgement: the source is no longer viewed
-            // locally while its release is in flight, and pane input is consequently blocked.
-            endpoints.set_surface_active(&activation.source.endpoint_id, false);
+        }
+        if let Err(error) = activation.start_target(endpoints, resize) {
+            return Err(ActivationBeginError::Partial {
+                activation: Box::new(activation),
+                error,
+            });
         }
         Ok(activation)
     }
@@ -162,45 +160,58 @@ impl PendingEndpointActivation {
 
     pub(crate) fn can_retarget(&self, endpoint_id: &ClientEndpointId) -> bool {
         self.target.endpoint_id == *endpoint_id
-            && self.successor.is_none()
             && matches!(
                 self.phase,
                 ActivationPhase::ReleasingSource { .. } | ActivationPhase::ActivatingTarget { .. }
             )
     }
 
-    /// Replace an in-flight handoff with the latest endpoint-qualified intent. The current
-    /// transaction is still reversed through target-off/source-on; the replacement is launched
-    /// by the caller only after the source's coherent restoration commits.
+    /// Retire the old handoff locally; the latest selection starts independently.
     pub(crate) fn supersede(
         &mut self,
         endpoint_id: ClientEndpointId,
         target: Option<crate::client::shell::ClientEndpointFocusTarget>,
         endpoints: &mut EndpointRegistry,
-    ) -> ActivationRollback {
-        self.successor = Some(EndpointActivationIntent {
+    ) -> EndpointActivationIntent {
+        for (index, lease) in [&self.source, &self.target].into_iter().enumerate() {
+            if index == 1 && self.source.endpoint_id == self.target.endpoint_id {
+                continue;
+            }
+            if lease.endpoint_id == endpoint_id
+                || !endpoints.accepts(&lease.endpoint_id, lease.generation)
+            {
+                continue;
+            }
+            endpoints.set_surface_active(&lease.endpoint_id, false);
+            let request_id = format!("client-shell-surface:{}:superseded-off", self.epoch);
+            let request = surface_interest_request(&lease.boot_id, request_id.clone(), false);
+            let _ = endpoints.send_to(
+                &lease.endpoint_id,
+                &crate::protocol::ClientMessage::ClientShellFocus { focused: false },
+            );
+            match request {
+                Ok(request)
+                    if endpoints.send_to(&lease.endpoint_id, &request)
+                        == EndpointSendOutcome::Sent =>
+                {
+                    endpoints.track_surface_release(
+                        &lease.endpoint_id,
+                        lease.boot_id.clone(),
+                        request_id,
+                        Instant::now() + ACTIVATION_TIMEOUT,
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => endpoints.fail(&lease.endpoint_id, error),
+            }
+        }
+        // A partly projected target is not a completed activation. Prevent the normal
+        // already-active shortcut from leaving input frozen when this same target is clicked.
+        endpoints.set_surface_active(&endpoint_id, false);
+        EndpointActivationIntent {
             endpoint_id,
             target,
-        });
-        // Source-on is already ordered and must finish before any replacement is allowed to
-        // begin. Later rapid selections only replace the retained intent; they never turn a
-        // safe restoration into an unavailable state.
-        let source_restoration_in_flight = matches!(
-            self.phase,
-            ActivationPhase::RestoringSource { .. }
-        ) || matches!(
-            &self.phase,
-            ActivationPhase::SynchronizingPresentation { completion, .. }
-                if matches!(completion.as_ref(), ActivationCompletion::RestoredSource { .. })
-        );
-        if source_restoration_in_flight {
-            return ActivationRollback::Pending;
         }
-        self.rollback(
-            endpoints,
-            "endpoint handoff superseded by a newer selection".into(),
-            false,
-        )
     }
 
     pub(crate) fn accepts_endpoint(&self, endpoint_id: &ClientEndpointId, generation: u64) -> bool {
@@ -258,10 +269,6 @@ impl PendingEndpointActivation {
             }
             ActivationPhase::AwaitingPresentationEffects { .. } => false,
         }
-    }
-
-    pub(crate) fn take_successor(&mut self) -> Option<EndpointActivationIntent> {
-        self.successor.take()
     }
 
     /// A deadline is transport failure, not a rejected operation. Retire the
@@ -935,7 +942,6 @@ impl PendingEndpointActivation {
                         .rollback_error
                         .clone()
                         .unwrap_or_else(|| "endpoint handoff was rolled back".into()),
-                    successor: self.successor.clone(),
                 };
                 (
                     self.source.clone(),
@@ -977,8 +983,6 @@ impl PendingEndpointActivation {
         resize: crate::protocol::ClientMessage,
     ) -> Result<(), String> {
         let request_id = format!("client-shell-surface:{}:on", self.epoch);
-        tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
-            "machine activation phase changed");
         self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
         // A transport may fail after writing any baseline or surface message. Enter the target
         // phase first so every uncertain target write is reversed through target-off before
@@ -991,6 +995,8 @@ impl PendingEndpointActivation {
             focus_acknowledged: self.focus.is_none(),
             evidence: ActivationEvidence::default(),
         };
+        tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
+            "machine activation phase changed");
         send_surface_activation(
             endpoints,
             &self.target,
