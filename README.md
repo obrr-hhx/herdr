@@ -1,4 +1,4 @@
-# Handson's Herdr fork
+# Herdr fork
 
 An independent fork of [herdrdev/herdr](https://github.com/herdrdev/herdr), maintained
 by [@obrr-hhx](https://github.com/obrr-hhx). **Issues and pull requests are welcome
