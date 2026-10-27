@@ -114,6 +114,13 @@ impl ClientShellState {
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
+        if self.local_chat_visible() {
+            let layout = self.layout(cols, rows);
+            let mut frame = self.compose_unavailable(cols, rows);
+            self.compose_graphics(&mut frame, layout);
+            self.compose_local_chat(&mut frame, layout.pane_surface);
+            return Some(frame);
+        }
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
                 .navigate_workspace_id
@@ -635,6 +642,7 @@ impl ClientShellState {
             self.hits.popup = None;
         }
         self.compose_graphics(&mut frame, layout);
+        self.compose_local_chat(&mut frame, layout.pane_surface);
         Some(frame)
     }
 }

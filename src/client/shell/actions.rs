@@ -464,6 +464,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn receive_endpoint_unavailable(&mut self, message: String) -> bool {
+        self.interrupt_local_chat();
         self.push_endpoint_notice(
             ClientEndpointNoticeKind::Unavailable,
             message.clone(),
@@ -577,6 +578,18 @@ impl ClientShellState {
         }
         match pending.kind {
             PendingEndpointKind::Generic => {}
+            PendingEndpointKind::LocalChatRead { generation } => {
+                return (
+                    self.complete_local_chat_read(generation, result),
+                    Vec::new(),
+                );
+            }
+            PendingEndpointKind::LocalChatSend { generation } => {
+                return (
+                    self.complete_local_chat_send(generation, result),
+                    Vec::new(),
+                );
+            }
             PendingEndpointKind::ProductAnnouncementDismiss { version, id } => {
                 return match result {
                     Ok(_) => (false, Vec::new()),

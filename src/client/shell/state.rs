@@ -665,6 +665,12 @@ impl ClientShellOverlay {
 #[derive(Debug)]
 pub(super) enum PendingEndpointKind {
     Generic,
+    LocalChatRead {
+        generation: u64,
+    },
+    LocalChatSend {
+        generation: u64,
+    },
     ProductAnnouncementDismiss {
         version: String,
         id: String,
@@ -890,6 +896,8 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) local_chat: Option<super::local_chat::LocalChat>,
+    pub(super) local_chat_generation: u64,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) pane_surface: Option<PaneSurfaceFrame>,
@@ -1044,6 +1052,8 @@ impl ClientShellState {
                 .extend(saved.collapsed_groups);
         }
         Self {
+            local_chat: None,
+            local_chat_generation: 0,
             config,
             snapshot: None,
             pane_surface: None,
@@ -1238,6 +1248,7 @@ impl ClientShellState {
     }
 
     pub(super) fn reset_endpoint_projection(&mut self) {
+        self.interrupt_local_chat();
         self.hits = ShellHitMap::default();
         self.pane_surface = None;
         self.pending_pane_surface = None;

@@ -35,6 +35,7 @@ impl HeadlessServer {
             self.send_to_client(client_id, message);
             return false;
         }
+        crate::server::client_commands::prepare_client_shell_method(&mut request.method);
         let surface_active = client.shell_surface_active;
         if let api::schema::Method::ClientShellSurfaceSet(params) = &request.method {
             let Some((changed, projection_revision)) =

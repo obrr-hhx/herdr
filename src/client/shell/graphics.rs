@@ -32,7 +32,8 @@ impl ClientShellState {
     }
 
     pub(super) fn compose_graphics(&mut self, frame: &mut FrameData, layout: ClientShellLayout) {
-        let local_cover = self.overlay.is_some()
+        let local_cover = self.local_chat_visible()
+            || self.overlay.is_some()
             || self.mode != ClientShellMode::Terminal
             || self.endpoint_error.is_some()
             || self.config_diagnostic.is_some()

@@ -20,6 +20,7 @@ mod global_menu;
 mod graphics;
 mod input;
 mod input_source;
+mod local_chat;
 mod mobile;
 mod mouse;
 mod notification_policy;
