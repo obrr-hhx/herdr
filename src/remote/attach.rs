@@ -2220,6 +2220,12 @@ fn write_managed_ssh_config() -> io::Result<ManagedSshConfig> {
     contents.push_str("Host *\n");
     contents.push_str("  ServerAliveInterval 15\n");
     contents.push_str("  ServerAliveCountMax 4\n");
+    // Semantic screen frames contain many repeated cells. Without compression,
+    // a large frame can fill a slow SSH channel and delay activation/health
+    // acknowledgements behind it. Set this before the private master starts;
+    // bridge-only flags cannot change an already negotiated shared transport.
+    // Earlier user configuration still wins, including Compression no.
+    contents.push_str("  Compression yes\n");
 
     let write_result = (|| {
         let mut file = crate::platform::create_remote_ssh_config_file(&path)?;
@@ -3019,6 +3025,10 @@ mod tests {
         assert!(
             contents.contains("ServerAliveCountMax 4"),
             "config should set the keepalive count: {contents}"
+        );
+        assert!(
+            contents.contains("Compression yes"),
+            "semantic terminal frames need compression on remote links: {contents}"
         );
         assert!(!contents.contains("ControlMaster"));
         assert!(!contents.contains("ControlPersist"));

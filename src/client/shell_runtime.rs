@@ -372,6 +372,9 @@ pub(super) fn complete_endpoint_activation(
 
     let _ = pending.take();
     endpoints.unfreeze_input();
+    debug!(target: "herdr::client::diagnostics", endpoint = ?endpoints.active_id(),
+        restored_source = matches!(completion, endpoint::ActivationCompletion::RestoredSource { .. }),
+        "machine activation completed");
     if let endpoint::ActivationCompletion::RestoredSource { error } = completion {
         if let Some(shell) = state.shell.as_mut() {
             shell.receive_endpoint_unavailable(error);
