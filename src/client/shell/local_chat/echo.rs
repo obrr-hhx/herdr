@@ -1,7 +1,7 @@
 //! Local submission feedback, kept separate from saved conversation records.
 use super::*;
 
-fn same_text(saved: &str, submitted: &str) -> bool {
+pub(super) fn saved_prompt_text(saved: &str) -> &str {
     let saved = saved.trim();
     let saved = saved
         .strip_prefix("<pasted_content ")
@@ -18,7 +18,11 @@ fn same_text(saved: &str, submitted: &str) -> bool {
             .then_some(text.trim())
         })
         .unwrap_or(saved);
-    saved == submitted.trim()
+    saved
+}
+
+fn same_text(saved: &str, submitted: &str) -> bool {
+    saved_prompt_text(saved) == submitted.trim()
 }
 
 pub(in crate::client::shell) struct LocalEcho {

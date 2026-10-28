@@ -2,7 +2,12 @@
 
 ## Unreleased
 
+### Changed
+- Local Claude conversation caching uses native-style prompt markers, assistant bullets, tool trees, hanging indentation, highlighted user messages, and a horizontal-rule composer while retaining local input and paged history.
+
 ### Fixed
+- Rebinding a cached draft after PTY handoff no longer mistakes a new runtime ID for a different Claude conversation or fences its new submission acknowledgement. A changed Claude conversation still requires manual retry.
+- A draft blocked after reconnect or server replacement now shows an accented Ctrl+R editor title and a recovery-first hint, including in narrow panes. Unlocking keeps the draft and never submits it automatically.
 - Local chat clears its temporary sent message when Claude saves multiline paste records with tagged closing markers, avoiding duplicate messages and a stuck history-sync label.
 - Claude prompt submissions on macOS and Linux retain a short paste settle interval instead of waiting 300 ms before Enter, reducing remote submission confirmation latency.
 

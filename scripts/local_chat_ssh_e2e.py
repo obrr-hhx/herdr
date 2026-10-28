@@ -204,7 +204,8 @@ def main():
     try:
         ui.wait("Sonnet")
         ui.send("\x1b[17~")
-        ui.wait("CLAUDE")
+        ui.wait("Esc terminal")
+        ui.wait("⏺", 60)
         ui.pump(1)
         ui.snap("01-wide")
         checks.append("actual SSH preview, F6 opens and history loads")
@@ -256,7 +257,7 @@ def main():
         )
         ui.resize(106, 24)
         ui.send("\x1b[5~")
-        ui.wait("READING")
+        ui.wait("Reading ")
         ui.snap("05-page-up")
         top = [line[28:-3] for line in ui.screen.display[3:14]]
         api(
@@ -278,7 +279,7 @@ def main():
         checks.append("Ctrl+End resumes latest cached output")
         # Wheel packets must update local reader rather than moving remote Claude viewport.
         ui.send("\x1b[<64;50;10M")
-        ui.wait("READING")
+        ui.wait("Reading ")
         ui.snap("08-wheel-up")
         ui.send("\x1b[<65;50;10M")
         ui.send("\x1b[1;5F")
@@ -286,7 +287,7 @@ def main():
         ui.send("\x01")
         ui.wait("PREFIX")
         ui.send("\x1b")
-        ui.wait("CLAUDE")
+        ui.wait("Esc terminal")
         checks.append("prefix controls remain accessible inside local view")
         ui.snap("09-final")
         ui.resize(160, 48)
@@ -314,7 +315,7 @@ def main():
         created_panes.append(right)
         api("pane", "run", right, "printf '\\nNEIGHBOUR_RIGHT_OK\\n'")
         ui.wait("NEIGHBOUR_RIGHT_OK")
-        ui.wait("CLAUDE")
+        ui.wait("Esc terminal")
         ui.snap("10-split-right")
         checks.append(
             "horizontal split keeps neighbour terminal visible beside local reader"
@@ -340,10 +341,10 @@ def main():
         ui.send(f"\x1b[<0;{col+1};{row+1}M")
         ui.send(f"\x1b[<0;{col+1};{row+1}m")
         ui.pump(1)
-        ui.wait_absent("CLAUDE")
+        ui.wait_absent("Esc terminal")
         ui.snap("11-clicked")
         api("pane", "focus", "--pane", right, "--direction", "left")
-        ui.wait("CLAUDE")
+        ui.wait("Esc terminal")
         checks.append(
             "mouse switches adjacent pane and returning restores local reader"
         )
@@ -354,11 +355,11 @@ def main():
         api("pane", "run", down, "printf '\\nNEIGHBOUR_DOWN_OK\\n'")
         ui.wait("NEIGHBOUR_DOWN_OK")
         ui.wait("NEIGHBOUR_RIGHT_OK")
-        ui.wait("CLAUDE")
+        ui.wait("Esc terminal")
         ui.snap("12-split-down")
         api("pane", "zoom", "w1:p1", "--on")
         ui.pump(2)
-        ui.wait("CLAUDE")
+        ui.wait("Esc terminal")
         ui.wait_absent("NEIGHBOUR_DOWN_OK")
         ui.snap("13-zoom")
         api("pane", "zoom", "w1:p1", "--off")

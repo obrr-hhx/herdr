@@ -92,10 +92,7 @@ impl ClientShellState {
                 .len()
                 .saturating_sub(chat.viewport_rows)
                 .saturating_sub(chat.offset);
-            wrap_starts(&chat.text, chat.width)
-                .get(top)
-                .copied()
-                .unwrap_or(0)
+            chat.history_row_starts.get(top).copied().unwrap_or(0)
         });
         let width = area.width - 4;
         if width != chat.width {
@@ -125,12 +122,16 @@ impl ClientShellState {
                 .echoes
                 .back()
                 .map(|echo| {
-                    let mut lines = wrap(&echo.text, width);
+                    let mut lines = wrap(&echo.text, width.saturating_sub(2));
                     if lines.len() > 6 {
                         lines.truncate(5);
                         lines.push("… [message continues]".into());
                     }
                     lines
+                        .into_iter()
+                        .enumerate()
+                        .map(|(row, line)| format!("{}{line}", if row == 0 { "❯ " } else { "  " }))
+                        .collect()
                 })
                 .unwrap_or_default();
             chat.echo_dirty = false;
@@ -172,53 +173,37 @@ impl ClientShellState {
         chat.viewport_rows = usize::from(chat.reader_area.height);
         let max_offset = chat.wrapped.len().saturating_sub(chat.viewport_rows);
         if let Some(anchor) = anchor {
-            let starts = wrap_starts(&chat.text, width);
-            let top = starts
+            let top = chat
+                .history_row_starts
                 .partition_point(|position| *position <= anchor)
                 .saturating_sub(1);
             chat.offset = max_offset.saturating_sub(top.min(max_offset));
         }
         chat.offset = chat.offset.min(max_offset);
         let top = max_offset.saturating_sub(chat.offset);
-        let label = if chat.transcript.want_older {
-            "LOADING"
-        } else if chat.offset > 0 {
-            "READING"
-        } else {
-            "CLAUDE"
-        };
-        render::put_text(
-            &mut buffer,
-            area.x + 1,
-            area.y,
-            area.width - 2,
-            label,
-            base.fg(palette.accent).add_modifier(Modifier::BOLD),
-        );
         let indicator = if chat.pending_history.is_some() || chat.pending_document.is_some() {
-            "New output ↓".to_string()
+            "Reading · New output ↓".to_string()
         } else if chat.offset > 0 {
             format!(
-                "{}–{} / {}",
+                "Reading {}–{} / {}",
                 top + 1,
                 (top + chat.viewport_rows).min(chat.wrapped.len()),
                 chat.wrapped.len()
             )
         } else if blocked {
             "Needs attention · Esc terminal".to_string()
-        } else if working && chat.transcript.loaded {
-            "Claude working…".to_string()
         } else if chat.transcript.loaded {
-            format!("Conversation · {} records", chat.transcript.records.len())
+            String::new()
         } else {
-            "Terminal cache · Loading history".to_string()
+            "Loading conversation…".to_string()
         };
-        if usize::from(area.width) > indicator.len() + label.len() + 5 {
+        let indicator_width = UnicodeWidthStr::width(indicator.as_str());
+        if !indicator.is_empty() && usize::from(area.width) > indicator_width + 4 {
             render::put_text(
                 &mut buffer,
-                area.right() - 2 - indicator.len() as u16,
+                area.right() - 2 - indicator_width as u16,
                 area.y,
-                indicator.len() as u16,
+                indicator_width as u16,
                 &indicator,
                 base.fg(palette.overlay0),
             );
@@ -230,19 +215,30 @@ impl ClientShellState {
             .take(chat.viewport_rows)
             .enumerate()
         {
+            let kind = chat
+                .wrapped_styles
+                .get(top + row)
+                .copied()
+                .unwrap_or_default();
+            let style = transcript::line_style(kind, palette);
+            if kind == LineKind::User {
+                buffer.set_style(
+                    Rect::new(
+                        chat.reader_area.x,
+                        chat.reader_area.y + row as u16,
+                        width,
+                        1,
+                    ),
+                    style,
+                );
+            }
             render::put_text(
                 &mut buffer,
                 chat.reader_area.x,
                 chat.reader_area.y + row as u16,
                 width,
                 line,
-                transcript::line_style(
-                    chat.wrapped_styles
-                        .get(top + row)
-                        .copied()
-                        .unwrap_or_default(),
-                    palette,
-                ),
+                style,
             );
         }
         if preview_rows > 0 {
@@ -252,7 +248,11 @@ impl ClientShellState {
                 chat.reader_area.x,
                 y,
                 width,
-                "Live terminal · not yet saved",
+                if blocked {
+                    "Needs attention · Esc terminal"
+                } else {
+                    "✻ Working…"
+                },
                 base.fg(palette.overlay0),
             );
             for (row, line) in chat
@@ -283,34 +283,38 @@ impl ClientShellState {
             } else {
                 chat.reader_area.bottom() + preview_rows
             };
-            let label = if chat.echoes.back().is_some_and(|echo| echo.acknowledged) {
-                "YOU · sent · syncing history"
-            } else {
-                "YOU · sending…"
-            };
-            render::put_text(
-                &mut buffer,
-                chat.reader_area.x,
-                y,
-                width,
-                label,
-                base.fg(palette.green),
-            );
             for (row, line) in chat
                 .echo_lines
                 .iter()
                 .take(usize::from(echo_rows - 1))
                 .enumerate()
             {
+                let style = transcript::line_style(LineKind::User, palette);
+                buffer.set_style(
+                    Rect::new(chat.reader_area.x, y + row as u16, width, 1),
+                    style,
+                );
                 render::put_text(
                     &mut buffer,
                     chat.reader_area.x,
-                    y + 1 + row as u16,
+                    y + row as u16,
                     width,
                     line,
-                    base.fg(palette.green),
+                    style,
                 );
             }
+            render::put_text(
+                &mut buffer,
+                chat.reader_area.x,
+                y + echo_rows - 1,
+                width,
+                if chat.echoes.back().is_some_and(|echo| echo.acknowledged) {
+                    "  Syncing history…"
+                } else {
+                    "✻ Sending…"
+                },
+                base.fg(palette.overlay0),
+            );
         }
         if max_offset > 0 && chat.viewport_rows > 0 {
             let thumb = (chat.viewport_rows * chat.viewport_rows / chat.wrapped.len()).max(1);
@@ -330,14 +334,18 @@ impl ClientShellState {
                 );
             }
         }
-        let edge = base.fg(palette.overlay0);
+        let edge = base.fg(if chat.uncertain {
+            palette.accent
+        } else {
+            palette.overlay0
+        });
         let box_width = area.width - 2;
         render::put_text(
             &mut buffer,
             area.x + 1,
             box_y,
             box_width,
-            &format!("╭{}╮", "─".repeat(usize::from(box_width - 2))),
+            &"─".repeat(usize::from(box_width)),
             edge,
         );
         render::put_text(
@@ -345,43 +353,30 @@ impl ClientShellState {
             area.x + 1,
             area.bottom() - 2,
             box_width,
-            &format!("╰{}╯", "─".repeat(usize::from(box_width - 2))),
+            &"─".repeat(usize::from(box_width)),
             edge,
         );
-        let title = if chat.sending.is_some() {
-            " Sending… "
-        } else {
-            " Message "
-        };
-        if box_width > title.len() as u16 + 4 {
+        let title = if chat.uncertain { " Ctrl+R " } else { "" };
+        if !title.is_empty() && box_width > title.len() as u16 + 4 {
             render::put_text(
                 &mut buffer,
                 area.x + 3,
                 box_y,
                 title.len() as u16,
                 title,
-                base.fg(palette.overlay0),
+                edge,
             );
         }
-        chat.editor_area = Rect::new(area.x + 2, box_y + 1, width, draft_rows as u16);
+        chat.editor_area = Rect::new(area.x + 3, box_y + 1, width, draft_rows as u16);
         chat.draft_top = cursor_line.saturating_sub(draft_rows.saturating_sub(1));
         for row in 0..draft_rows {
             let y = box_y + 1 + row as u16;
-            render::put_text(&mut buffer, area.x + 1, y, 1, "│", edge);
-            render::put_text(&mut buffer, area.right() - 2, y, 1, "│", edge);
-            if let Some(line) = chat.draft_layout.get(chat.draft_top + row) {
-                render::put_text(&mut buffer, area.x + 2, y, width, line, base);
+            if row == 0 {
+                render::put_text(&mut buffer, area.x + 1, y, 1, "❯", edge);
             }
-        }
-        if chat.draft.is_empty() && chat.sending.is_none() && width >= 20 {
-            render::put_text(
-                &mut buffer,
-                area.x + 2,
-                box_y + 1,
-                width,
-                "Type a message…",
-                base.fg(palette.overlay0),
-            );
+            if let Some(line) = chat.draft_layout.get(chat.draft_top + row) {
+                render::put_text(&mut buffer, chat.editor_area.x, y, width, line, base);
+            }
         }
         let help = if chat.uncertain
             || chat.status.starts_with("History unavailable")
@@ -392,9 +387,9 @@ impl ClientShellState {
         {
             chat.status.as_str()
         } else if width >= 76 {
-            "Enter send   Ctrl+J newline   PgUp/PgDn read   Ctrl+End live   Esc terminal"
+            "Ctrl+J newline · PgUp/PgDn history · Ctrl+End live · Esc terminal"
         } else if width >= 48 {
-            "Enter send · Ctrl+J newline · PgUp read · Esc back"
+            "Ctrl+J newline · PgUp history · Esc terminal"
         } else if width >= 26 {
             "Enter send · Esc terminal"
         } else {

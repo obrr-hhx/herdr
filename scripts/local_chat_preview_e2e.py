@@ -83,7 +83,7 @@ try:
     wait_until(lambda: done() >= 1)
     ui.wait("Sonnet")
     ui.send("\x1b[17~")
-    ui.wait("Conversation", 60)
+    ui.wait("Esc terminal", 60)
     ui.wait("BASE_SESSION_READY", 60)
     ui.snap("01-loaded-reader")
     local_before = client_log.read_text().count(
@@ -156,7 +156,7 @@ try:
         previous = client_log.read_text().count("local chat submission acknowledged")
         start = time.monotonic()
         os.write(ui.master, b"\r")
-        wait_until(lambda: "YOU · sending" in ui.text() and prompt in ui.text(), 3)
+        wait_until(lambda: "Sending…" in ui.text() and prompt in ui.text(), 3)
         local_ms = round((time.monotonic() - start) * 1000, 2)
         assert local_ms < 250, local_ms
         assert prompt in ui.text(), ui.text()
@@ -181,7 +181,7 @@ try:
         )
         reply_ms = round((time.monotonic() - start) * 1000, 2)
         wait_until(
-            lambda: "YOU · sending" not in ui.text() and "YOU · sent" not in ui.text(),
+            lambda: "Sending…" not in ui.text() and "Syncing history…" not in ui.text(),
             30,
         )
         assert ui.text().count(prompt) == 1, ui.text()

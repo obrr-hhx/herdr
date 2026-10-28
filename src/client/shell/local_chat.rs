@@ -33,6 +33,7 @@ pub(super) struct LocalChat {
     uncertain: bool,
     pub(super) text: String,
     wrapped: Vec<String>,
+    history_row_starts: Vec<usize>,
     pending_history: Option<(String, bool)>,
     draft_layout: Vec<String>,
     draft_prefix: Vec<String>,
@@ -229,7 +230,7 @@ impl LocalChat {
             return;
         }
         self.text = text;
-        self.wrapped = wrap(&self.text, self.width);
+        self.rewrap_history();
     }
 
     fn resume_live(&mut self) {
@@ -373,6 +374,7 @@ impl ClientShellState {
             uncertain: false,
             text: String::new(),
             wrapped: Vec::new(),
+            history_row_starts: Vec::new(),
             pending_history: None,
             draft_layout: Vec::new(),
             draft_prefix: Vec::new(),
@@ -575,6 +577,7 @@ impl ClientShellState {
             .is_none_or(|s| s.boot_id != chat.boot_id)
         {
             if let Some(chat) = self.local_chat.as_mut() {
+                chat.uncertain = true;
                 chat.status =
                     "Remote server changed. Inspect terminal, then Ctrl+R to reconnect this draft."
                         .into();

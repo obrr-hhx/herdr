@@ -367,7 +367,7 @@ fn local_chat_responsive_editor_cursor_and_help_fit_all_host_sizes() {
         if chat.area.width >= 16 && chat.area.height >= 7 {
             let text = frame_text(&frame);
             assert!(
-                text.contains("╭"),
+                text.contains("❯") && text.contains("──"),
                 "editor must be visibly separated at {cols}x{rows}"
             );
             assert!(
@@ -522,7 +522,7 @@ fn local_chat_resize_keeps_reading_anchor_and_retained_neighbour_during_projecti
     let frame = state
         .compose(106, 40)
         .expect("local cache remains responsive");
-    assert!(frame_text(&frame).contains("CLAUDE") || frame_text(&frame).contains("READING"));
+    assert!(frame_text(&frame).contains("row "));
     assert!(state.hits.panes.is_empty());
 }
 
@@ -601,4 +601,36 @@ fn local_chat_vertical_cursor_moves_between_wrapped_visual_rows() {
         .unwrap()
         .draft
         .starts_with("xxxxY"));
+}
+
+#[test]
+fn local_chat_restart_lock_exposes_recovery_in_the_editor_at_narrow_widths() {
+    for cols in [54, 80, 106, 160] {
+        let (mut state, _) = reader();
+        state.handle_input_bytes(b"never sent draft");
+        state.interrupt_local_chat();
+        state.snapshot.as_mut().unwrap().boot_id = "boot-2".into();
+        let outcome = press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+        assert!(outcome.actions.is_empty());
+        let frame = state.compose(cols, 24).unwrap();
+        let chat = state.local_chat.as_ref().unwrap();
+        let title_y = chat.editor_area.y - 1;
+        let title: String = frame
+            .to_ratatui_buffer()
+            .unwrap()
+            .content()
+            .chunks(usize::from(cols))
+            .nth(usize::from(title_y))
+            .unwrap()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(title.contains("Ctrl+R"), "cols={cols}: {title}");
+        assert_eq!(chat.draft, "never sent draft");
+        press(&mut state, KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(state.local_chat.as_ref().unwrap().draft, "never sent draft");
+        assert!(!press(&mut state, KeyCode::Enter, KeyModifiers::empty())
+            .actions
+            .is_empty());
+    }
 }

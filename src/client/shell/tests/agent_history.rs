@@ -76,7 +76,7 @@ fn saved_history_styles_distinguish_user_code_tools_and_assistant() {
     let frame = state.compose(106, 30).unwrap();
     let buffer = frame.to_ratatui_buffer().unwrap();
     let palette = &state.config.palette;
-    for color in [palette.green, palette.teal, palette.mauve, palette.accent] {
+    for color in [palette.panel_bg, palette.teal, palette.overlay0] {
         assert!(
             buffer
                 .content()
@@ -85,6 +85,10 @@ fn saved_history_styles_distinguish_user_code_tools_and_assistant() {
             "missing semantic color {color:?}"
         );
     }
+    assert!(buffer
+        .content()
+        .iter()
+        .any(|c| c.bg == palette.text && !c.symbol().trim().is_empty()));
 }
 
 #[test]
@@ -300,7 +304,7 @@ fn saved_history_live_terminal_tail_is_separate_and_hidden_while_reading() {
         Ok(history("UNSAVED_LIVE_FRAGMENT".into())),
     );
     let frame = frame_text(&state.compose(106, 30).unwrap());
-    assert!(frame.contains("Live terminal"));
+    assert!(frame.contains("Working…"));
     assert!(frame.contains("UNSAVED_LIVE_FRAGMENT"));
     assert!(!state
         .local_chat
@@ -394,7 +398,7 @@ fn saved_history_render_profile() {
             pane.focused = false;
             state.snapshot.as_mut().unwrap().panes.push(pane);
         }
-        let records=(0..5000).map(|i|record(i,"assistant",&format!("Saved reply {i}\n中文 content in a real-width editor\n```rust\nlet cached = true;\n```"))).collect();
+        let records=(0..5000).map(|i|record(i,if i % 2 == 0 { "user" } else { "assistant" },&format!("Saved reply {i}\n中文 content in a real-width editor\n```rust\nlet cached = true;\n```"))).collect();
         let start = std::time::Instant::now();
         complete(&mut state, page(records, 0), false);
         state.compose(120, 40).unwrap();
@@ -448,7 +452,7 @@ fn saved_history_local_echo_is_visible_before_any_ack_and_deduplicates_on_save()
     assert!(sent.actions.iter().any(|action|matches!(action,ClientShellAction::Endpoint{request,..} if matches!(request.method,crate::api::schema::Method::AgentPrompt(_)))));
     let text = frame_text(&state.compose(106, 24).unwrap());
     assert!(
-        text.contains("IMMEDIATE_LOCAL_MESSAGE") && text.contains("YOU · sending"),
+        text.contains("IMMEDIATE_LOCAL_MESSAGE") && text.contains("Sending…"),
         "{text}"
     );
     complete(
@@ -458,7 +462,7 @@ fn saved_history_local_echo_is_visible_before_any_ack_and_deduplicates_on_save()
     );
     let text = frame_text(&state.compose(106, 24).unwrap());
     assert_eq!(text.matches("IMMEDIATE_LOCAL_MESSAGE").count(), 1, "{text}");
-    assert!(!text.contains("YOU · sending"));
+    assert!(!text.contains("Sending…"));
 }
 
 #[test]
@@ -478,7 +482,7 @@ fn saved_history_failed_echo_restores_draft_without_a_fake_sent_message() {
         text.contains("KEEP_UNCONFIRMED") && text.contains("Send not confirmed"),
         "{text}"
     );
-    assert!(!text.contains("YOU · sending") && !text.contains("YOU · sent"));
+    assert!(!text.contains("Sending…") && !text.contains("Syncing history…"));
 }
 
 #[test]
@@ -516,14 +520,14 @@ fn saved_history_echo_is_not_confirmed_by_an_older_identical_message() {
         page(vec![record(1, "user", "repeat exactly")], 0),
         false,
     );
-    assert!(frame_text(&state.compose(106, 24).unwrap()).contains("YOU · sending"));
+    assert!(frame_text(&state.compose(106, 24).unwrap()).contains("Sending…"));
     complete(
         &mut state,
         page(vec![record(2, "user", "repeat exactly")], 0),
         false,
     );
     let text = frame_text(&state.compose(106, 24).unwrap());
-    assert!(!text.contains("YOU · sending"));
+    assert!(!text.contains("Sending…"));
     assert_eq!(text.matches("repeat exactly").count(), 2);
 }
 
@@ -575,7 +579,7 @@ fn saved_history_session_change_fences_an_old_send_ack_from_manual_retry() {
     ));
     let text = frame_text(&state.compose(106, 24).unwrap());
     assert!(
-        text.contains("YOU · sending") && !text.contains("late old result"),
+        text.contains("Sending…") && !text.contains("late old result"),
         "{text}"
     );
 }
@@ -598,9 +602,83 @@ fn saved_history_multiline_paste_reconciles_tagged_claude_records() {
         );
         let text = frame_text(&state.compose(106, 24).unwrap());
         assert!(
-            !text.contains("YOU · sending") && !text.contains("YOU · sent"),
+            !text.contains("Sending…") && !text.contains("Syncing history…"),
             "{text}"
         );
         assert_eq!(text.matches("FIRST_PASTED_LINE").count(), 1, "{text}");
     }
+}
+
+#[test]
+fn saved_history_uses_native_claude_prompts_and_tool_tree_without_role_headers() {
+    let (mut state, _) = reader();
+    complete(&mut state, page(vec![
+        record(0, "user", "<pasted_content id=\"abc1\">\nNative question\nsecond line\n</pasted_content id=\"abc1\">"),
+        record(1, "assistant", "## Native answer\n- **Use** `value`\n```rust\nlet value = 1;\n```"),
+        record(2, "tool_call", "Read"),
+        record(3, "tool_result", "file contents"),
+    ], 0), false);
+    let text = frame_text(&state.compose(160, 40).unwrap());
+    for expected in [
+        "❯ Native question",
+        "⏺ Native answer",
+        "⏺ Read",
+        "⎿",
+        "file contents",
+        "let value = 1;",
+        "- Use value",
+    ] {
+        assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    for removed in [
+        "YOU",
+        "CLAUDE",
+        "Conversation ·",
+        "pasted_content",
+        "```",
+        "╭",
+        "╰",
+    ] {
+        assert!(!text.contains(removed), "unexpected {removed}: {text}");
+    }
+}
+
+#[test]
+fn saved_history_runtime_handoff_does_not_relock_a_rebound_claude_conversation() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "same conversation")], 0),
+        false,
+    );
+    state.handle_input_bytes(b"manual retry after handoff");
+    state.interrupt_local_chat();
+    state.snapshot.as_mut().unwrap().boot_id = "boot-2".into();
+    press(&mut state, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    let generation = state.local_chat_generation;
+    let outcome = press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+    assert!(!outcome.actions.is_empty());
+    let mut rebound = page(vec![record(0, "assistant", "same conversation")], 0);
+    rebound.terminal_id = "imported-runtime".into();
+    state.complete_agent_history(HistoryResult {
+        endpoint: state.active_endpoint_id.clone(),
+        boot: "boot-2".into(),
+        generation,
+        older: false,
+        result: Ok(rebound),
+    });
+    assert_eq!(state.local_chat_generation, generation);
+    assert!(state.local_chat.as_ref().unwrap().draft.is_empty());
+    assert!(!frame_text(&state.compose(106, 24).unwrap()).contains("session changed"));
+    assert!(state.complete_local_chat_send(
+        generation,
+        Err(ClientShellEndpointError {
+            code: None,
+            message: "controlled failure".into(),
+        })
+    ));
+    assert_eq!(
+        state.local_chat.as_ref().unwrap().draft,
+        "manual retry after handoff"
+    );
 }

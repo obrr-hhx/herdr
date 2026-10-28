@@ -166,7 +166,7 @@ ui = UI()
 try:
     ui.wait("Sonnet")
     ui.send("\x1b[17~")
-    ui.wait("Conversation", 40)
+    ui.wait("Esc terminal", 40)
     deadline = time.monotonic() + 60
     while seed["early"] not in ui.text():
         ui.send("\x1b[1;5H")
@@ -250,7 +250,7 @@ ui = UI()
 try:
     ui.wait("Sonnet")
     ui.send("\x1b[17~")
-    ui.wait("Conversation", 40)
+    ui.wait("Esc terminal", 40)
     deadline = time.monotonic() + 60
     while seed["early"] not in ui.text():
         ui.send("\x1b[1;5H")
@@ -316,7 +316,7 @@ ui = UI(launch=[BIN, "--session", local_session], env_overrides=env)
 try:
     ui.wait("Sonnet", 60)
     ui.send("\x1b[17~")
-    ui.wait("Conversation", 40)
+    ui.wait("Esc terminal", 40)
     deadline = time.monotonic() + 60
     while seed["early"] not in ui.text():
         ui.send("\x1b[1;5H")

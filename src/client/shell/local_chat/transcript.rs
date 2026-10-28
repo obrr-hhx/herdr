@@ -25,7 +25,6 @@ pub(in crate::client::shell) struct Transcript {
     pub(in crate::client::shell) busy: bool,
     pub(in crate::client::shell) revision: String,
     pub(in crate::client::shell) session: String,
-    terminal: String,
     pub(in crate::client::shell) before: u64,
     pub(in crate::client::shell) has_older: bool,
     pub(in crate::client::shell) want_older: bool,
@@ -38,63 +37,150 @@ pub(in crate::client::shell) struct Document {
     pub(in crate::client::shell) anchors: Vec<(String, usize)>,
 }
 
+// Display Markdown emphasis without leaking markup into the terminal transcript.
+// Code spans keep their literal contents, including any emphasis delimiters.
+fn markdown_text(mut text: &str) -> String {
+    let mut rendered = String::new();
+    while !text.is_empty() {
+        let next = ["`", "**", "__"]
+            .into_iter()
+            .filter_map(|marker| text.find(marker).map(|offset| (offset, marker)))
+            .min_by_key(|(offset, _)| *offset);
+        let Some((offset, marker)) = next else {
+            rendered.push_str(text);
+            break;
+        };
+        rendered.push_str(&text[..offset]);
+        let rest = &text[offset + marker.len()..];
+        if let Some(end) = rest.find(marker).filter(|end| *end > 0) {
+            let body = &rest[..end];
+            if marker == "`" {
+                rendered.push_str(body);
+            } else {
+                rendered.push_str(&markdown_text(body));
+            }
+            text = &rest[end + marker.len()..];
+        } else {
+            rendered.push_str(marker);
+            text = rest;
+        }
+    }
+    rendered
+}
+
 pub(in crate::client::shell) fn document(records: &[HistoryRecord]) -> Document {
     let mut lines = Vec::new();
     let mut anchors = Vec::new();
     let mut bytes = 0;
     for record in records {
-        let (label, kind) = match record.kind.as_str() {
-            "user" => ("YOU", LineKind::User),
-            "assistant" => ("CLAUDE", LineKind::Assistant),
-            "tool_call" => ("TOOL", LineKind::Tool),
-            "tool_result" => ("TOOL RESULT", LineKind::Tool),
-            "error" => ("TOOL ERROR", LineKind::Error),
+        let (prefix, kind) = match record.kind.as_str() {
+            "user" => ("❯ ", LineKind::User),
+            "assistant" => ("⏺ ", LineKind::Assistant),
+            "tool_call" => ("⏺ ", LineKind::Tool),
+            "tool_result" => ("  ⎿  ", LineKind::Muted),
+            "error" => ("  ⎿  ", LineKind::Error),
             _ => continue,
         };
         anchors.push((record.id.clone(), bytes));
-        bytes += label.len() + 1;
-        lines.push((
-            label.to_string(),
-            if kind == LineKind::Assistant {
-                LineKind::Heading
-            } else {
-                kind
-            },
-        ));
+        let text = if kind == LineKind::User {
+            echo::saved_prompt_text(&record.text)
+        } else {
+            &record.text
+        };
         let mut code = false;
-        for line in record.text.lines() {
-            let style = if line.trim_start().starts_with("```") {
+        let mut first = true;
+        for line in text.lines() {
+            if kind == LineKind::Assistant && line.trim_start().starts_with("```") {
                 code = !code;
-                LineKind::Muted
-            } else if code {
+                continue;
+            }
+            let heading = kind == LineKind::Assistant && !code && line.starts_with('#');
+            let line = if heading {
+                line.trim_start_matches('#').trim_start()
+            } else {
+                line
+            };
+            let style = if code {
                 LineKind::Code
-            } else if line.starts_with('#') {
+            } else if heading {
                 LineKind::Heading
             } else {
                 kind
             };
-            bytes += line.len() + 1;
-            lines.push((line.to_owned(), style));
+            let prefix = if first {
+                prefix
+            } else if matches!(record.kind.as_str(), "tool_result" | "error") {
+                "     "
+            } else {
+                "  "
+            };
+            let rendered = if kind == LineKind::Assistant && !code {
+                format!("{prefix}{}", markdown_text(line))
+            } else {
+                format!("{prefix}{line}")
+            };
+            bytes += rendered.len() + 1;
+            lines.push((rendered, style));
+            first = false;
         }
-        bytes += 1;
-        lines.push((String::new(), LineKind::Plain));
+        if record.kind != "tool_call" {
+            bytes += 1;
+            lines.push((String::new(), LineKind::Plain));
+        }
     }
     Document { lines, anchors }
+}
+
+fn native_wrapped_line(line: &str, width: u16) -> (Vec<String>, Vec<usize>) {
+    let prefix = ["  ⎿  ", "❯ ", "⏺ ", "     ", "  "]
+        .into_iter()
+        .find(|prefix| line.starts_with(*prefix))
+        .unwrap_or("");
+    let indent = UnicodeWidthStr::width(prefix);
+    let body = &line[prefix.len()..];
+    let body_width = width.saturating_sub(indent as u16).max(1);
+    let rows = wrap(body, body_width);
+    let starts = wrap_starts(body, body_width)
+        .into_iter()
+        .enumerate()
+        .map(|(index, start)| if index == 0 { 0 } else { prefix.len() + start })
+        .collect();
+    let rows = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            format!(
+                "{}{row}",
+                if index == 0 {
+                    prefix.to_owned()
+                } else {
+                    " ".repeat(indent)
+                }
+            )
+        })
+        .collect();
+    (rows, starts)
 }
 
 impl LocalChat {
     pub(in crate::client::shell) fn rewrap_history(&mut self) {
         self.wrapped_styles.clear();
+        self.history_row_starts.clear();
         if self.document_lines.is_empty() {
             self.wrapped = wrap(&self.text, self.width);
+            self.history_row_starts = wrap_starts(&self.text, self.width);
             return;
         }
         self.wrapped.clear();
+        let mut bytes = 0;
         for (line, kind) in &self.document_lines {
-            let rows = wrap(line, self.width);
+            let (rows, starts) = native_wrapped_line(line, self.width);
             self.wrapped_styles
                 .extend(std::iter::repeat_n(*kind, rows.len()));
+            self.history_row_starts
+                .extend(starts.into_iter().map(|start| bytes + start));
             self.wrapped.extend(rows);
+            bytes += line.len() + 1;
         }
     }
 
@@ -131,9 +217,9 @@ impl LocalChat {
             self.transcript.revision = page.revision;
             return false;
         }
-        let changed_session = self.transcript.loaded
-            && (self.transcript.session != page.session_id
-                || self.transcript.terminal != page.terminal_id);
+        // PTY handoff replaces runtime IDs without replacing the Claude conversation.
+        // Endpoint boot/generation already fences the old transport independently.
+        let changed_session = self.transcript.loaded && self.transcript.session != page.session_id;
         if changed_session {
             if let Some(sent) = self.sending.take() {
                 self.draft = format!(
@@ -164,7 +250,6 @@ impl LocalChat {
                     || self.transcript.has_older != page.has_older
                     || self.transcript.want_older));
         self.transcript.session = page.session_id;
-        self.transcript.terminal = page.terminal_id;
         if !older {
             self.transcript.revision = page.revision;
         } else if first {
@@ -240,10 +325,7 @@ impl LocalChat {
                 .len()
                 .saturating_sub(self.viewport_rows)
                 .saturating_sub(self.offset);
-            let anchor_byte = wrap_starts(&self.text, self.width)
-                .get(anchor)
-                .copied()
-                .unwrap_or(0);
+            let anchor_byte = self.history_row_starts.get(anchor).copied().unwrap_or(0);
             let old_anchor = self
                 .document_anchors
                 .iter()
@@ -267,8 +349,10 @@ impl LocalChat {
                         })
                 })
                 .unwrap_or(0);
-            let starts = wrap_starts(&self.text, self.width);
-            let top = starts.partition_point(|p| *p <= anchor).saturating_sub(1);
+            let top = self
+                .history_row_starts
+                .partition_point(|p| *p <= anchor)
+                .saturating_sub(1);
             self.offset = self
                 .wrapped
                 .len()
@@ -309,16 +393,12 @@ impl ClientShellState {
                 if status_changed {
                     chat.status = "Saved conversation history loaded".into();
                 }
-                let previous_session = chat.transcript.loaded.then(|| {
-                    (
-                        chat.transcript.session.clone(),
-                        chat.transcript.terminal.clone(),
-                    )
-                });
+                let previous_session = chat
+                    .transcript
+                    .loaded
+                    .then(|| chat.transcript.session.clone());
                 let changed = chat.apply_transcript(page, completed.older);
-                if previous_session.is_some_and(|(session, terminal)| {
-                    session != chat.transcript.session || terminal != chat.transcript.terminal
-                }) {
+                if previous_session.is_some_and(|session| session != chat.transcript.session) {
                     self.local_chat_generation = self.local_chat_generation.saturating_add(1);
                     chat.generation = self.local_chat_generation;
                 }
@@ -338,11 +418,39 @@ pub(in crate::client::shell) fn line_style(kind: LineKind, palette: &Palette) ->
     let base = Style::default().bg(palette.panel_bg);
     match kind {
         LineKind::Plain | LineKind::Assistant => base.fg(palette.text),
-        LineKind::User => base.fg(palette.green),
+        LineKind::User => base.fg(palette.panel_bg).bg(palette.text),
         LineKind::Tool => base.fg(palette.mauve),
         LineKind::Code => base.fg(palette.teal).bg(palette.sidebar_bg),
-        LineKind::Heading => base.fg(palette.accent).add_modifier(Modifier::BOLD),
+        LineKind::Heading => base.fg(palette.text).add_modifier(Modifier::BOLD),
         LineKind::Muted => base.fg(palette.overlay0),
         LineKind::Error => base.fg(palette.red),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_markdown_keeps_literal_code_and_unclosed_delimiters() {
+        assert_eq!(markdown_text("**bold** and `2**3`"), "bold and 2**3");
+        assert_eq!(
+            markdown_text("unclosed ** and `literal"),
+            "unclosed ** and `literal"
+        );
+    }
+
+    #[test]
+    fn native_wrapping_retains_hanging_indent_and_unicode_byte_anchors() {
+        let line = "⏺ 中文 Unicode content that wraps across multiple rows";
+        let (rows, starts) = native_wrapped_line(line, 12);
+        assert_eq!(rows.len(), starts.len());
+        assert!(rows[0].starts_with("⏺ "));
+        assert!(rows[1..].iter().all(|row| row.starts_with("  ")));
+        assert!(rows
+            .iter()
+            .all(|row| UnicodeWidthStr::width(row.as_str()) <= 12));
+        assert!(starts.iter().all(|start| line.is_char_boundary(*start)));
+        assert!(starts.windows(2).all(|pair| pair[0] < pair[1]));
     }
 }
