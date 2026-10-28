@@ -374,11 +374,8 @@ pub(super) fn complete_endpoint_activation(
                 state.retire_endpoint_graphics(previous);
             }
         }
-        // The coherent target frame can replace the frozen source now, but the registry keeps
-        // pane input disabled until a second projection epoch has replayed host modes/effects.
-        if let Some(shell) = state.shell.as_mut() {
-            shell.clear_activation_preview();
-        }
+        // Keep the read-only preview until host modes/effects have also synchronized.
+        // A visible live composer must not accept a send while its input lease is paused.
         state.unfreeze_presentation();
         let (cleanup, frame) = {
             let shell = state.shell.as_mut().expect("checked client shell");

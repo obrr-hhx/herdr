@@ -10,6 +10,9 @@ For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr]
 During a machine switch, the client immediately displays a read-only cached view of a previously visited pane, labeled as syncing. Terminal input remains paused until the remote activation and terminal-mode synchronization complete. An unvisited pane displays a waiting view instead of another pane's cached content. These previews stay in memory, bounded to eight screens and 200,000 terminal cells.
 
 
+Remote presentation phases and background surface release have a bounded 15-second budget; local phases keep their 5-second budget. This avoids discarding an otherwise healthy SSH connection when a large compressed frame takes longer than five seconds. The preview remains read-only until synchronization completes.
+
+
 ## Detach and reattach
 
 Detach the client with `ctrl+b q`; panes and agents keep running. Reattach by running `herdr` again. Stop the session and its panes with `herdr server stop`.

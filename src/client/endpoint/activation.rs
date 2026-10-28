@@ -12,6 +12,18 @@ use model::{ActivationEvidence, ActivationPhase, EndpointLease};
 use protocol::*;
 
 const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_ACTIVATION_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn presentation_timeout(endpoint: &ClientEndpointId) -> Duration {
+    // A compressed large screen can still take more than five seconds on a slow
+    // SSH stream. The read-only preview is already visible; avoid tearing down
+    // a healthy remote transport and repeating setup while its frame is arriving.
+    if endpoint.is_local() {
+        ACTIVATION_TIMEOUT
+    } else {
+        REMOTE_ACTIVATION_TIMEOUT
+    }
+}
 
 pub(super) fn valid_surface_release(request_id: &str, data: &[u8]) -> bool {
     decode_endpoint_response(request_id, data)
@@ -124,7 +136,7 @@ impl PendingEndpointActivation {
                     &activation.source.endpoint_id,
                     activation.source.boot_id.clone(),
                     format!("client-shell-surface:{serial}:off"),
-                    now + ACTIVATION_TIMEOUT,
+                    now + presentation_timeout(&activation.source.endpoint_id),
                 );
             } else {
                 activation.source_available = false;
@@ -198,7 +210,7 @@ impl PendingEndpointActivation {
                         &lease.endpoint_id,
                         lease.boot_id.clone(),
                         request_id,
-                        Instant::now() + ACTIVATION_TIMEOUT,
+                        Instant::now() + presentation_timeout(&lease.endpoint_id),
                     );
                 }
                 Ok(_) => {}
@@ -983,7 +995,7 @@ impl PendingEndpointActivation {
         resize: crate::protocol::ClientMessage,
     ) -> Result<(), String> {
         let request_id = format!("client-shell-surface:{}:on", self.epoch);
-        self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
+        self.deadline = Instant::now() + presentation_timeout(&self.target.endpoint_id);
         // A transport may fail after writing any baseline or surface message. Enter the target
         // phase first so every uncertain target write is reversed through target-off before
         // source restoration is considered.
@@ -1028,7 +1040,7 @@ impl PendingEndpointActivation {
         };
         tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
             "machine activation phase changed");
-        self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
+        self.deadline = Instant::now() + presentation_timeout(&lease.endpoint_id);
         if endpoints.send_to(&lease.endpoint_id, &request) != EndpointSendOutcome::Sent {
             return Err("endpoint presentation synchronization could not be sent".into());
         }
@@ -1050,7 +1062,7 @@ impl PendingEndpointActivation {
         };
         tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
             "machine activation phase changed");
-        self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
+        self.deadline = Instant::now() + presentation_timeout(&lease.endpoint_id);
         let message = crate::protocol::ClientMessage::EndpointControl {
             kind: crate::protocol::endpoint::PRESENTATION_EFFECTS_SYNC_KIND.into(),
             data: token,
@@ -1069,7 +1081,7 @@ impl PendingEndpointActivation {
         self.phase = ActivationPhase::ReleasingTargetForRollback { request_id };
         tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
             "machine activation phase changed");
-        self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
+        self.deadline = Instant::now() + presentation_timeout(&self.target.endpoint_id);
         if endpoints.send_to(&self.target.endpoint_id, &request) != EndpointSendOutcome::Sent {
             return Err("target endpoint release could not be sent".into());
         }
@@ -1090,7 +1102,7 @@ impl PendingEndpointActivation {
         };
         tracing::debug!(target: "herdr::client::diagnostics", phase = self.phase.diagnostic_name(),
             "machine activation phase changed");
-        self.deadline = Instant::now() + ACTIVATION_TIMEOUT;
+        self.deadline = Instant::now() + presentation_timeout(&self.source.endpoint_id);
         send_surface_activation(
             endpoints,
             &self.source,

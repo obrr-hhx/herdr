@@ -56,3 +56,5 @@ terminal-cell PNG/text captures and JSON results; see `--help` for dependencies 
 The submitted text appears immediately in a separate local message with a sending indicator. A remote acknowledgement changes it to sent; the saved user record replaces it without a duplicate. Unconfirmed sends return to the draft and are never automatically retried. Up to 16 messages may await history synchronization; beyond that the draft is retained.
 
 Live terminal previews reuse already-received surface cells instead of sharing the command queue with passive reads. Saved-history polling temporarily runs up to four times per second while a submission awaits synchronization, with only one read in flight. Remote submission still includes the agent paste/Enter delay and network transit; local echo is not evidence of a Claude reply.
+
+`python3 scripts/local_chat_preview_e2e.py --help` describes the optional real-SSH checks for cached switching, rapid retargeting, local echo, acknowledgement timing, and reconciliation. Supply a dedicated test session with a ready Claude test agent.
