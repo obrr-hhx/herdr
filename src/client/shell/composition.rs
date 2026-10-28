@@ -310,6 +310,25 @@ impl ClientShellState {
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        // The reader replaces terminal pixels, but notices and shell overlays must
+        // remain above it. Drawing it last erased their text while leaving borders.
+        if self.local_chat_visible() {
+            let area = self.local_chat_area(layout.pane_surface);
+            let status = snapshot
+                .agents
+                .iter()
+                .find(|agent| Some(&agent.pane_id) == snapshot.focused_pane_id.as_ref())
+                .map(|agent| agent.agent_status);
+            if let Some(chat) = self.local_chat.as_mut() {
+                Self::compose_local_chat_frame(
+                    chat,
+                    &self.config.palette,
+                    status,
+                    &mut frame,
+                    area,
+                );
+            }
+        }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let has_selection = self
             .selection
@@ -665,7 +684,6 @@ impl ClientShellState {
             self.hits.pane_splits.clear();
         }
         self.compose_graphics(&mut frame, layout);
-        self.compose_local_chat(&mut frame, layout.pane_surface);
         Some(frame)
     }
 }

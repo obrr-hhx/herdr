@@ -45,11 +45,21 @@ impl ClientShellState {
                     .find(|agent| Some(&agent.pane_id) == snapshot.focused_pane_id.as_ref())
             })
             .map(|agent| agent.agent_status);
-        let working = status == Some(crate::api::schema::AgentStatus::Working);
-        let blocked = status == Some(crate::api::schema::AgentStatus::Blocked);
         let Some(chat) = self.local_chat.as_mut() else {
             return;
         };
+        Self::compose_local_chat_frame(chat, &self.config.palette, status, frame, area);
+    }
+
+    pub(in crate::client::shell) fn compose_local_chat_frame(
+        chat: &mut LocalChat,
+        palette: &Palette,
+        status: Option<crate::api::schema::AgentStatus>,
+        frame: &mut FrameData,
+        area: Rect,
+    ) {
+        let working = status == Some(crate::api::schema::AgentStatus::Working);
+        let blocked = status == Some(crate::api::schema::AgentStatus::Blocked);
         let Some(mut buffer) = frame.to_ratatui_buffer() else {
             return;
         };
@@ -57,7 +67,6 @@ impl ClientShellState {
         chat.area = area;
         chat.reader_area = Rect::default();
         chat.editor_area = Rect::default();
-        let palette = &self.config.palette;
         let base = Style::default().fg(palette.text).bg(palette.panel_bg);
         for y in area.y..area.bottom() {
             for x in area.x..area.right() {

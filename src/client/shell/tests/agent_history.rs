@@ -88,6 +88,30 @@ fn saved_history_styles_distinguish_user_code_tools_and_assistant() {
 }
 
 #[test]
+fn saved_history_does_not_erase_endpoint_notice_content() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "Saved reply")], 0),
+        false,
+    );
+    state.push_endpoint_notice(
+        ClientEndpointNoticeKind::Unavailable,
+        "history-test-notice",
+        "Connection notice",
+        "The endpoint is temporarily unavailable",
+    );
+    let frame = state.compose(106, 24).unwrap();
+    let text = frame_text(&frame);
+    assert!(text.contains("Connection notice"), "{text}");
+    assert!(
+        text.contains("The endpoint is temporarily unavailable"),
+        "{text}"
+    );
+    assert!(text.contains("Saved reply"), "{text}");
+}
+
+#[test]
 fn saved_history_refresh_deduplicates_records_and_freezes_reading_until_live() {
     let (mut state, _) = reader();
     let records = (0..100)
