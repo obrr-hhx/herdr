@@ -201,8 +201,15 @@ try:
     )
 
     ui.send("\x1b[1;5F")
-    ui.wait(seed["code"].lower())
-    ui.wait("CODE_COMPLETE")
+    # Other acceptance runs append real replies after the original code turn.
+    # Find the saved code by scrolling instead of assuming it is still the tail.
+    deadline = time.monotonic() + 60
+    while "fn " + seed["code"].lower() not in ui.text():
+        ui.send("\x1b[5~")
+        ui.pump(0.25)
+        if time.monotonic() > deadline:
+            ui.snap("FAIL-saved-code-not-reachable")
+            raise AssertionError("saved assistant code was not reachable")
     ui.snap("history-03-code-color")
     code_row = next(
         i
