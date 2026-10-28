@@ -3,15 +3,21 @@ use super::*;
 
 fn same_text(saved: &str, submitted: &str) -> bool {
     let saved = saved.trim();
-    let saved = if saved.starts_with("<pasted_content ") {
-        saved
-            .split_once('>')
-            .and_then(|(_, body)| body.strip_suffix("</pasted_content>"))
-            .unwrap_or(saved)
-            .trim()
-    } else {
-        saved
-    };
+    let saved = saved
+        .strip_prefix("<pasted_content ")
+        .and_then(|wrapped| wrapped.split_once('>'))
+        .and_then(|(attributes, body)| {
+            let (text, closing) = body.rsplit_once("</pasted_content")?;
+            // Claude writes both a plain close tag and a close tag repeating the ID.
+            // Require matching attributes so a malformed wrapper cannot confirm a send.
+            (closing == ">"
+                || closing
+                    .strip_prefix(' ')
+                    .and_then(|closing| closing.strip_suffix('>'))
+                    == Some(attributes))
+            .then_some(text.trim())
+        })
+        .unwrap_or(saved);
     saved == submitted.trim()
 }
 
@@ -123,5 +129,21 @@ impl ClientShellState {
             chat.update_text(lines.join("\n"), false);
         }
         outcome.repaint = true;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_text;
+
+    #[test]
+    fn malformed_paste_wrappers_cannot_confirm_another_message() {
+        for saved in [
+            "<pasted_content id=\"a\">hello</pasted_content id=\"b\">",
+            "<pasted_content id=\"a\">hello</pasted_content>trailing",
+            "prefix<pasted_content id=\"a\">hello</pasted_content>",
+        ] {
+            assert!(!same_text(saved, "hello"));
+        }
     }
 }

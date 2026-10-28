@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+- Local chat clears its temporary sent message when Claude saves multiline paste records with tagged closing markers, avoiding duplicate messages and a stuck history-sync label.
+- Claude prompt submissions on macOS and Linux retain a short paste settle interval instead of waiting 300 ms before Enter, reducing remote submission confirmation latency.
+
 ## [0.9.0] - 2026-09-07
 
 ### Added

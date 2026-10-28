@@ -579,3 +579,28 @@ fn saved_history_session_change_fences_an_old_send_ack_from_manual_retry() {
         "{text}"
     );
 }
+
+#[test]
+fn saved_history_multiline_paste_reconciles_tagged_claude_records() {
+    for closing in ["</pasted_content>", "</pasted_content id=\"abc1\">"] {
+        let (mut state, _) = reader();
+        complete(
+            &mut state,
+            page(vec![record(0, "assistant", "previous")], 0),
+            false,
+        );
+        state.handle_input_bytes(b"\x1b[200~FIRST_PASTED_LINE\nSECOND_PASTED_LINE\x1b[201~");
+        press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+        complete(
+            &mut state,
+            page(vec![record(1, "user", &format!("\n<pasted_content id=\"abc1\">\nFIRST_PASTED_LINE\nSECOND_PASTED_LINE\n{closing}\n"))], 0),
+            false,
+        );
+        let text = frame_text(&state.compose(106, 24).unwrap());
+        assert!(
+            !text.contains("YOU · sending") && !text.contains("YOU · sent"),
+            "{text}"
+        );
+        assert_eq!(text.matches("FIRST_PASTED_LINE").count(), 1, "{text}");
+    }
+}
