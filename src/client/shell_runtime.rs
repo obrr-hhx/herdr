@@ -12,6 +12,34 @@ pub(super) fn dispatch_client_shell_actions(
     let mut repaint = false;
     for action in actions {
         match action {
+            shell::ClientShellAction::ReadAgentHistory {
+                endpoint,
+                boot,
+                generation,
+                pane,
+                before,
+                known,
+            } => {
+                if !endpoint_commands.history.start(
+                    endpoint.clone(),
+                    boot.clone(),
+                    generation,
+                    pane,
+                    before,
+                    known,
+                ) {
+                    if let Some(shell) = shell.as_deref_mut() {
+                        repaint |=
+                            shell.complete_agent_history(super::history_jobs::HistoryResult {
+                                endpoint,
+                                boot,
+                                generation,
+                                older: before.is_some(),
+                                result: Err("history readers are busy".into()),
+                            });
+                    }
+                }
+            }
             shell::ClientShellAction::Endpoint {
                 endpoint_id,
                 boot_id,

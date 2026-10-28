@@ -111,6 +111,53 @@ fn validate_profile_path_id(profile_id: &str) -> io::Result<()> {
     }
 }
 
+/// Reusable read-only source for the public `agent history` provider. The SSH
+/// master survives successive reads; existing terminal/server processes are untouched.
+pub(crate) struct ClaudeHistoryReader {
+    ssh: RemoteSsh,
+}
+
+impl ClaudeHistoryReader {
+    pub(crate) fn new(target: &str) -> io::Result<Self> {
+        super::validate_remote_target(target).map_err(io::Error::other)?;
+        Ok(Self {
+            ssh: RemoteSsh::new_noninteractive(
+                target.to_owned(),
+                crate::config::Config::load()
+                    .config
+                    .remote
+                    .manage_ssh_config,
+            ),
+        })
+    }
+    pub(crate) fn read(
+        &self,
+        session: &str,
+        pane: &str,
+        before: Option<u64>,
+        known: &str,
+    ) -> io::Result<crate::agent_history::HistoryPage> {
+        crate::session::validate_name(session).map_err(io::Error::other)?;
+        let cursor = before.map_or_else(|| "latest".into(), |v| v.to_string());
+        let args = [session, pane, &cursor, known]
+            .map(super::shell_quote)
+            .join(" ");
+        let script = format!("python3 - {args} <<'HERDR_CLAUDE_HISTORY_PROVIDER'\n{}\nHERDR_CLAUDE_HISTORY_PROVIDER\n", crate::agent_history::PYTHON_SOURCE);
+        let output = self.ssh.sh_output(&script)?;
+        crate::agent_history::parse_output(&output.stdout)
+    }
+}
+
+pub(crate) fn read_claude_history(
+    target: &str,
+    session: &str,
+    pane: &str,
+    before: Option<u64>,
+    known: &str,
+) -> io::Result<crate::agent_history::HistoryPage> {
+    ClaudeHistoryReader::new(target)?.read(session, pane, before, known)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

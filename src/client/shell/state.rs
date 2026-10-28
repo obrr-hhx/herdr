@@ -292,6 +292,14 @@ pub(super) struct WorkspaceHit {
 
 #[derive(Debug)]
 pub(crate) enum ClientShellAction {
+    ReadAgentHistory {
+        endpoint: ClientEndpointId,
+        boot: String,
+        generation: u64,
+        pane: String,
+        before: Option<u64>,
+        known: String,
+    },
     Endpoint {
         endpoint_id: ClientEndpointId,
         boot_id: String,
@@ -898,6 +906,7 @@ pub(super) struct ClientCopyModeState {
 pub(crate) struct ClientShellState {
     pub(super) local_chat: Option<super::local_chat::LocalChat>,
     pub(super) local_chat_generation: u64,
+    pub(super) history_source_enabled: bool,
     pub(super) config: ClientShellConfig,
     pub(super) snapshot: Option<Box<ClientShellSnapshot>>,
     pub(super) pane_surface: Option<PaneSurfaceFrame>,
@@ -1054,6 +1063,7 @@ impl ClientShellState {
         Self {
             local_chat: None,
             local_chat_generation: 0,
+            history_source_enabled: true,
             config,
             snapshot: None,
             pane_surface: None,

@@ -318,6 +318,7 @@ fn agent_command() -> Command {
         .about("Control and inspect agent panes")
         .subcommand(Command::new("list").about("List agents"))
         .subcommand(id_command("get", "target", "Show an agent"))
+        .subcommand(Command::new("history").about("Read saved Claude conversation history").arg(required("pane-id", "PANE_ID")).arg(option("before", "BYTE_OFFSET")).arg(option("ssh-target", "SSH_TARGET")))
         .subcommand(
             Command::new("read")
                 .about("Read agent terminal output")

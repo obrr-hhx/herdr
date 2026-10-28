@@ -35,6 +35,18 @@ impl ClientShellState {
             return;
         }
         let area = self.local_chat_area(area);
+        let status = self
+            .snapshot
+            .as_deref()
+            .and_then(|snapshot| {
+                snapshot
+                    .agents
+                    .iter()
+                    .find(|agent| Some(&agent.pane_id) == snapshot.focused_pane_id.as_ref())
+            })
+            .map(|agent| agent.agent_status);
+        let working = status == Some(crate::api::schema::AgentStatus::Working);
+        let blocked = status == Some(crate::api::schema::AgentStatus::Blocked);
         let Some(chat) = self.local_chat.as_mut() else {
             return;
         };
@@ -80,7 +92,7 @@ impl ClientShellState {
         if width != chat.width {
             chat.draft_dirty = true;
             chat.width = width;
-            chat.wrapped = wrap(&chat.text, width);
+            chat.rewrap_history();
         }
         if chat.draft_dirty || chat.draft_layout.is_empty() {
             chat.draft_layout = wrap(&chat.draft, width);
@@ -111,6 +123,17 @@ impl ClientShellState {
             width,
             box_y.saturating_sub(area.y + 2),
         );
+        let preview_rows = if (working || blocked)
+            && chat.transcript.loaded
+            && chat.offset == 0
+            && !chat.live_preview.is_empty()
+            && chat.reader_area.height > 8
+        {
+            (chat.live_preview.len() as u16 + 1).min(6)
+        } else {
+            0
+        };
+        chat.reader_area.height = chat.reader_area.height.saturating_sub(preview_rows);
         chat.viewport_rows = usize::from(chat.reader_area.height);
         let max_offset = chat.wrapped.len().saturating_sub(chat.viewport_rows);
         if let Some(anchor) = anchor {
@@ -122,7 +145,13 @@ impl ClientShellState {
         }
         chat.offset = chat.offset.min(max_offset);
         let top = max_offset.saturating_sub(chat.offset);
-        let label = if chat.offset > 0 { "READING" } else { "CLAUDE" };
+        let label = if chat.transcript.want_older {
+            "LOADING"
+        } else if chat.offset > 0 {
+            "READING"
+        } else {
+            "CLAUDE"
+        };
         render::put_text(
             &mut buffer,
             area.x + 1,
@@ -131,7 +160,7 @@ impl ClientShellState {
             label,
             base.fg(palette.accent).add_modifier(Modifier::BOLD),
         );
-        let indicator = if chat.pending_history.is_some() {
+        let indicator = if chat.pending_history.is_some() || chat.pending_document.is_some() {
             "New output ↓".to_string()
         } else if chat.offset > 0 {
             format!(
@@ -140,13 +169,14 @@ impl ClientShellState {
                 (top + chat.viewport_rows).min(chat.wrapped.len()),
                 chat.wrapped.len()
             )
+        } else if blocked {
+            "Needs attention · Esc terminal".to_string()
+        } else if working && chat.transcript.loaded {
+            "Claude working…".to_string()
+        } else if chat.transcript.loaded {
+            format!("Conversation · {} records", chat.transcript.records.len())
         } else {
-            if chat.truncated {
-                "History limited · Live"
-            } else {
-                "Local input · Live"
-            }
-            .to_string()
+            "Terminal cache · Loading history".to_string()
         };
         if usize::from(area.width) > indicator.len() + label.len() + 5 {
             render::put_text(
@@ -171,8 +201,40 @@ impl ClientShellState {
                 chat.reader_area.y + row as u16,
                 width,
                 line,
-                base,
+                transcript::line_style(
+                    chat.wrapped_styles
+                        .get(top + row)
+                        .copied()
+                        .unwrap_or_default(),
+                    palette,
+                ),
             );
+        }
+        if preview_rows > 0 {
+            let y = chat.reader_area.bottom();
+            render::put_text(
+                &mut buffer,
+                chat.reader_area.x,
+                y,
+                width,
+                "Live terminal · not yet saved",
+                base.fg(palette.overlay0),
+            );
+            for (row, line) in chat
+                .live_preview
+                .iter()
+                .take(usize::from(preview_rows - 1))
+                .enumerate()
+            {
+                render::put_text(
+                    &mut buffer,
+                    chat.reader_area.x,
+                    y + 1 + row as u16,
+                    width,
+                    line,
+                    base.fg(palette.overlay1),
+                );
+            }
         }
         if max_offset > 0 && chat.viewport_rows > 0 {
             let thumb = (chat.viewport_rows * chat.viewport_rows / chat.wrapped.len()).max(1);
@@ -249,6 +311,7 @@ impl ClientShellState {
             || chat.status.starts_with("History unavailable")
             || chat.status.starts_with("Remote server")
             || chat.status.starts_with("Draft limit")
+            || chat.status.starts_with("Saved history unavailable")
         {
             chat.status.as_str()
         } else if width >= 76 {

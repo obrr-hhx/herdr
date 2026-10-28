@@ -1,7 +1,11 @@
 use super::*;
 use crate::api::schema::{PaneReadResult, ReadFormat, ReadSource, ResponseResult};
 
-fn press(state: &mut ClientShellState, key: KeyCode, modifiers: KeyModifiers) -> ClientShellInput {
+pub(super) fn press(
+    state: &mut ClientShellState,
+    key: KeyCode,
+    modifiers: KeyModifiers,
+) -> ClientShellInput {
     state.handle_raw_events(vec![RawInputEvent::Key(crate::input::TerminalKey::new(
         key, modifiers,
     ))])
@@ -14,8 +18,9 @@ fn request(actions: &[ClientShellAction]) -> &crate::api::schema::Request {
     request
 }
 
-fn reader() -> (ClientShellState, String) {
+pub(super) fn reader() -> (ClientShellState, String) {
     let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    state.history_source_enabled = false; // This fixture injects terminal reads; transcript tests opt in explicitly.
     let mut snap = snapshot();
     snap.agents.push(ClientShellAgent {
         pane_id: "pane_1".into(),
@@ -45,7 +50,7 @@ fn reader() -> (ClientShellState, String) {
     (state, id)
 }
 
-fn history(text: String) -> ResponseResult {
+pub(super) fn history(text: String) -> ResponseResult {
     ResponseResult::PaneRead {
         read: PaneReadResult {
             pane_id: "pane_1".into(),
@@ -317,7 +322,7 @@ fn local_chat_latency_profile_with_delayed_ack() {
     }
 }
 
-fn frame_text(frame: &FrameData) -> String {
+pub(super) fn frame_text(frame: &FrameData) -> String {
     frame
         .cells
         .chunks(usize::from(frame.width))

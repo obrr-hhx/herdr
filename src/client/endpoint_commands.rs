@@ -65,6 +65,7 @@ impl EndpointCommandLane {
 
 #[derive(Default)]
 pub(super) struct EndpointCommands {
+    pub(super) history: super::history_jobs::HistoryJobs,
     lanes: HashMap<ClientEndpointId, EndpointCommandLane>,
 }
 
@@ -307,6 +308,7 @@ mod tests {
 
     fn commands_with_in_flight() -> EndpointCommands {
         EndpointCommands {
+            history: super::super::history_jobs::HistoryJobs::default(),
             lanes: HashMap::from([(
                 endpoint(),
                 EndpointCommandLane {

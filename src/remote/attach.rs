@@ -72,15 +72,21 @@ pub(crate) fn run_remote(remote: RemoteLaunch) -> io::Result<()> {
     )?;
 
     let _bridge = SshStdioBridge::start(
-        remote.target,
+        remote.target.clone(),
         prepared_remote.remote_herdr,
         local_socket.clone(),
-        session_name,
+        session_name.clone(),
         remote_ssh.options(),
         false,
     )?;
 
-    run_client_process(&local_socket, &reattach_command, remote.keybindings)
+    run_client_process(
+        &local_socket,
+        &reattach_command,
+        remote.keybindings,
+        &remote.target,
+        &session_name,
+    )
 }
 
 pub(crate) fn prepare_saved_ssh(target: &str, session_name: &str) -> io::Result<()> {
@@ -585,7 +591,7 @@ impl RemoteSsh {
         command
     }
 
-    fn sh_output(&self, script: &str) -> io::Result<Output> {
+    pub(super) fn sh_output(&self, script: &str) -> io::Result<Output> {
         let script = posix_remote_output_command(script);
         let mut child = self
             .command()
@@ -2612,6 +2618,8 @@ fn run_client_process(
     local_socket: &Path,
     reattach_command: &str,
     keybindings: RemoteKeybindings,
+    history_target: &str,
+    history_session: &str,
 ) -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let status = Command::new(exe)
@@ -2620,6 +2628,8 @@ fn run_client_process(
             crate::server::socket_paths::CLIENT_SOCKET_PATH_ENV_VAR,
             local_socket,
         )
+        .env(crate::agent_history::REMOTE_TARGET_ENV, history_target)
+        .env(crate::agent_history::REMOTE_SESSION_ENV, history_session)
         .env(REATTACH_COMMAND_ENV_VAR, reattach_command)
         .env(REMOTE_KEYBINDINGS_ENV_VAR, keybindings.as_str())
         .env_remove(crate::api::SOCKET_PATH_ENV_VAR)

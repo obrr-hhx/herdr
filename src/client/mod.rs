@@ -25,6 +25,7 @@ mod errors;
 mod events;
 mod frame_output;
 mod handshake;
+mod history_jobs;
 mod input;
 mod loop_config;
 mod notifications;
@@ -2019,6 +2020,9 @@ async fn run_client_loop(
                     let (effects, outcome, frame) = {
                         let shell = state.shell.as_mut().expect("checked shell mode");
                         let mut outcome = shell.tick_selection_autoscroll(now);
+                        for completed in endpoint_commands.history.poll() {
+                            outcome.repaint |= shell.complete_agent_history(completed);
+                        }
                         shell.tick_local_chat(now, &mut outcome);
                         for expired in expired_endpoints {
                             if !shell.endpoint_is_active(&expired.endpoint_id) {

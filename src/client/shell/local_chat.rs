@@ -8,7 +8,9 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEv
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
+mod transcript;
 mod view;
+use transcript::{LineKind, Transcript};
 
 const MAX_DRAFT_BYTES: usize = 64 * 1024;
 const MAX_CACHE_BYTES: usize = 1024 * 1024;
@@ -43,6 +45,12 @@ pub(super) struct LocalChat {
     pub(super) reader_area: Rect,
     pub(super) editor_area: Rect,
     draft_top: usize,
+    pub(super) transcript: Transcript,
+    document_lines: Vec<(String, LineKind)>,
+    wrapped_styles: Vec<LineKind>,
+    pending_document: Option<transcript::Document>,
+    document_anchors: Vec<(String, usize)>,
+    live_preview: Vec<String>,
 }
 
 fn wrap(text: &str, width: u16) -> Vec<String> {
@@ -222,6 +230,11 @@ impl LocalChat {
 
     fn resume_live(&mut self) {
         self.offset = 0;
+        self.resume_transcript();
+        if self.transcript.loaded {
+            self.transcript.revision.clear();
+            self.transcript.next = None;
+        }
         if let Some((text, truncated)) = self.pending_history.take() {
             self.update_text(text, truncated);
         }
@@ -275,6 +288,8 @@ impl ClientShellState {
             chat.generation = self.local_chat_generation;
             chat.in_flight = false;
             chat.last_revision = None;
+            chat.transcript.busy = false;
+            chat.transcript.next = None;
             if let Some(sent) = chat.sending.take() {
                 chat.draft = format!(
                     "{sent}{}{}",
@@ -366,6 +381,12 @@ impl ClientShellState {
             reader_area: Rect::default(),
             editor_area: Rect::default(),
             draft_top: 0,
+            transcript: Transcript::default(),
+            document_lines: Vec::new(),
+            wrapped_styles: Vec::new(),
+            pending_document: None,
+            document_anchors: Vec::new(),
+            live_preview: Vec::new(),
         });
         self.tick_local_chat(Instant::now(), outcome);
         outcome.repaint = true;
@@ -373,6 +394,54 @@ impl ClientShellState {
 
     pub(crate) fn tick_local_chat(&mut self, now: Instant, outcome: &mut ClientShellInput) {
         if !self.local_chat_matches() {
+            return;
+        }
+        let bound_boot = self
+            .local_chat
+            .as_ref()
+            .zip(self.snapshot.as_deref())
+            .is_some_and(|(c, s)| c.boot_id == s.boot_id);
+        if self.history_source_enabled
+            && bound_boot
+            && self.endpoint_is_online(&self.active_endpoint_id)
+        {
+            if let Some(chat) = self.local_chat.as_mut().filter(|c| {
+                c.active && !c.transcript.busy && c.transcript.next.is_none_or(|next| now >= next)
+            }) {
+                chat.transcript.busy = true;
+                chat.transcript.next = Some(now + Duration::from_secs(1));
+                outcome.actions.push(ClientShellAction::ReadAgentHistory {
+                    endpoint: chat.endpoint.clone(),
+                    boot: chat.boot_id.clone(),
+                    generation: chat.generation,
+                    pane: chat.pane_id.clone(),
+                    before: chat.transcript.want_older.then_some(chat.transcript.before),
+                    known: chat.transcript.revision.clone(),
+                });
+            }
+        }
+        let preview_active = self.snapshot.as_deref().is_some_and(|s| {
+            s.agents.iter().any(|agent| {
+                Some(&agent.pane_id) == s.focused_pane_id.as_ref()
+                    && matches!(
+                        agent.agent_status,
+                        crate::api::schema::AgentStatus::Working
+                            | crate::api::schema::AgentStatus::Blocked
+                    )
+            })
+        });
+        if self
+            .local_chat
+            .as_ref()
+            .is_some_and(|c| c.transcript.loaded)
+            && !preview_active
+        {
+            if let Some(chat) = self.local_chat.as_mut() {
+                if !chat.live_preview.is_empty() {
+                    chat.live_preview.clear();
+                    outcome.repaint = true;
+                }
+            }
             return;
         }
         let Some(chat) = self
@@ -434,6 +503,22 @@ impl ClientShellState {
             return false;
         };
         chat.in_flight = false;
+        if chat.transcript.loaded {
+            if let Ok(ResponseResult::PaneRead { read }) = result {
+                if read.pane_id == chat.pane_id {
+                    let text = history_text(read.text);
+                    chat.live_preview = text
+                        .lines()
+                        .filter(|line| !line.trim().is_empty())
+                        .rev()
+                        .take(5)
+                        .map(|line| line.chars().take(4096).collect::<String>())
+                        .collect();
+                    chat.live_preview.reverse();
+                }
+            }
+            return chat.active && chat.offset == 0;
+        }
         match result {
             Ok(ResponseResult::PaneRead { read }) if read.pane_id == chat.pane_id => {
                 chat.update_text(read.text, read.truncated);
@@ -673,6 +758,13 @@ impl ClientShellState {
                 }
             }
             _ => return false,
+        }
+        let upward = matches!(event, RawInputEvent::Key(key) if key.code==KeyCode::PageUp || (key.code==KeyCode::Home && key.modifiers.contains(KeyModifiers::CONTROL)))
+            || matches!(event, RawInputEvent::Mouse(mouse) if mouse.kind==MouseEventKind::ScrollUp);
+        if upward {
+            if let Some(chat) = self.local_chat.as_mut() {
+                chat.request_older();
+            }
         }
         outcome.repaint = true;
         true
