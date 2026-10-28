@@ -74,68 +74,6 @@ impl LocalChat {
     }
 }
 
-impl ClientShellState {
-    /// Reuse the received terminal surface; do not queue passive RPCs ahead of a send.
-    pub(super) fn refresh_local_chat_surface(
-        &mut self,
-        now: Instant,
-        outcome: &mut ClientShellInput,
-    ) {
-        let Some(chat) = self
-            .local_chat
-            .as_mut()
-            .filter(|c| c.active && now >= c.next_refresh)
-        else {
-            return;
-        };
-        let Some(surface) = self.pane_surface.as_ref() else {
-            return;
-        };
-        let Some(pane) = surface.panes.iter().find(|p| p.pane_id == chat.pane_id) else {
-            return;
-        };
-        if chat.last_revision == Some(pane.content_revision) {
-            return;
-        }
-        chat.last_revision = Some(pane.content_revision);
-        chat.next_refresh = now + Duration::from_millis(100);
-        let rect = Rect::new(
-            pane.inner_rect.x,
-            pane.inner_rect.y,
-            pane.inner_rect.width,
-            pane.inner_rect.height,
-        );
-        let start = if chat.transcript.loaded {
-            rect.bottom().saturating_sub(12).max(rect.y)
-        } else {
-            rect.y
-        };
-        let mut lines = Vec::new();
-        for y in start..rect.bottom().min(surface.frame.height) {
-            let mut line = String::new();
-            for x in rect.x..rect.right().min(surface.frame.width) {
-                if let Some(cell) = surface
-                    .frame
-                    .cells
-                    .get(usize::from(y) * usize::from(surface.frame.width) + usize::from(x))
-                {
-                    line.push_str(&cell.symbol);
-                }
-            }
-            if !line.trim().is_empty() {
-                lines.push(line.trim_end().to_string());
-            }
-        }
-        if chat.transcript.loaded {
-            chat.live_preview = lines.into_iter().rev().take(5).collect();
-            chat.live_preview.reverse();
-        } else {
-            chat.update_text(lines.join("\n"), false);
-        }
-        outcome.repaint = true;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::same_text;

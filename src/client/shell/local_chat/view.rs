@@ -72,6 +72,12 @@ impl ClientShellState {
             for x in area.x..area.right() {
                 buffer[(x, y)].reset();
                 buffer[(x, y)].set_style(base);
+                if let Some(cell) = frame
+                    .cells
+                    .get_mut(usize::from(y) * usize::from(frame.width) + usize::from(x))
+                {
+                    cell.hyperlink = None;
+                }
             }
         }
         if area.width < 16 || area.height < 7 {
@@ -143,33 +149,34 @@ impl ClientShellState {
             .clamp(1, 6)
             .min(usize::from(area.height.saturating_sub(6).max(1)));
         let box_y = area.bottom() - draft_rows as u16 - 3;
-        chat.reader_area = Rect::new(
-            area.x + 2,
-            area.y + 2,
-            width,
-            box_y.saturating_sub(area.y + 2),
-        );
+        // The latest view reuses native body cells at their native width. Do not clip a
+        // wider stale geometry or stack another copy of the transcript underneath it.
+        let using_live = !chat.reading_history
+            && chat.offset == 0
+            && chat.pending_history_scroll == 0
+            && !blocked
+            && chat.echoes.is_empty()
+            && chat
+                .live_surface
+                .body
+                .as_ref()
+                .is_some_and(|body| body.area.width <= area.width);
+        chat.reader_area = if using_live {
+            Rect::new(area.x, area.y, area.width, box_y.saturating_sub(area.y))
+        } else {
+            Rect::new(
+                area.x + 2,
+                area.y + 2,
+                width,
+                box_y.saturating_sub(area.y + 2),
+            )
+        };
         let echo_rows = if chat.offset == 0 && !chat.echo_lines.is_empty() {
             (chat.echo_lines.len() as u16 + 1).min(chat.reader_area.height.saturating_sub(3))
         } else {
             0
         };
-        let preview_rows = if (working || blocked)
-            && chat.transcript.loaded
-            && chat.offset == 0
-            && !chat.live_preview.is_empty()
-            && chat.reader_area.height > 8
-        {
-            (chat.live_preview.len() as u16 + 1)
-                .min(6)
-                .min(chat.reader_area.height.saturating_sub(echo_rows + 3))
-        } else {
-            0
-        };
-        chat.reader_area.height = chat
-            .reader_area
-            .height
-            .saturating_sub(preview_rows + echo_rows);
+        chat.reader_area.height = chat.reader_area.height.saturating_sub(echo_rows);
         chat.viewport_rows = usize::from(chat.reader_area.height);
         let max_offset = chat.wrapped.len().saturating_sub(chat.viewport_rows);
         if let Some(anchor) = anchor {
@@ -181,9 +188,11 @@ impl ClientShellState {
         }
         chat.offset = chat.offset.min(max_offset);
         let top = max_offset.saturating_sub(chat.offset);
-        let indicator = if chat.pending_history.is_some() || chat.pending_document.is_some() {
+        let indicator = if chat.pending_history_scroll > 0 {
+            "Loading saved history…".to_string()
+        } else if chat.pending_history.is_some() || chat.pending_document.is_some() {
             "Reading · New output ↓".to_string()
-        } else if chat.offset > 0 {
+        } else if chat.reading_history || chat.offset > 0 {
             format!(
                 "Reading {}–{} / {}",
                 top + 1,
@@ -192,13 +201,15 @@ impl ClientShellState {
             )
         } else if blocked {
             "Needs attention · Esc terminal".to_string()
+        } else if working {
+            "✻ Working…".to_string()
         } else if chat.transcript.loaded {
             String::new()
         } else {
             "Loading conversation…".to_string()
         };
         let indicator_width = UnicodeWidthStr::width(indicator.as_str());
-        if !indicator.is_empty() && usize::from(area.width) > indicator_width + 4 {
+        if !using_live && !indicator.is_empty() && usize::from(area.width) > indicator_width + 4 {
             render::put_text(
                 &mut buffer,
                 area.right() - 2 - indicator_width as u16,
@@ -208,66 +219,49 @@ impl ClientShellState {
                 base.fg(palette.overlay0),
             );
         }
-        for (row, line) in chat
-            .wrapped
-            .iter()
-            .skip(top)
-            .take(chat.viewport_rows)
-            .enumerate()
-        {
-            let kind = chat
-                .wrapped_styles
-                .get(top + row)
-                .copied()
-                .unwrap_or_default();
-            let style = transcript::line_style(kind, palette);
-            if kind == LineKind::User {
-                buffer.set_style(
-                    Rect::new(
-                        chat.reader_area.x,
-                        chat.reader_area.y + row as u16,
-                        width,
-                        1,
-                    ),
-                    style,
-                );
+        if using_live {
+            if let Some(body) = chat.live_surface.body.as_ref() {
+                let source_top = body.area.height.saturating_sub(chat.reader_area.height);
+                let rows = body.area.height.min(chat.reader_area.height);
+                for row in 0..rows {
+                    for col in 0..body.area.width {
+                        buffer[(chat.reader_area.x + col, chat.reader_area.y + row)] =
+                            body[(col, source_top + row)].clone();
+                    }
+                }
             }
-            render::put_text(
-                &mut buffer,
-                chat.reader_area.x,
-                chat.reader_area.y + row as u16,
-                width,
-                line,
-                style,
-            );
-        }
-        if preview_rows > 0 {
-            let y = chat.reader_area.bottom();
-            render::put_text(
-                &mut buffer,
-                chat.reader_area.x,
-                y,
-                width,
-                if blocked {
-                    "Needs attention · Esc terminal"
-                } else {
-                    "✻ Working…"
-                },
-                base.fg(palette.overlay0),
-            );
+        } else {
             for (row, line) in chat
-                .live_preview
+                .wrapped
                 .iter()
-                .take(usize::from(preview_rows - 1))
+                .skip(top)
+                .take(chat.viewport_rows)
                 .enumerate()
             {
+                let kind = chat
+                    .wrapped_styles
+                    .get(top + row)
+                    .copied()
+                    .unwrap_or_default();
+                let style = transcript::line_style(kind, palette);
+                if kind == LineKind::User {
+                    buffer.set_style(
+                        Rect::new(
+                            chat.reader_area.x,
+                            chat.reader_area.y + row as u16,
+                            width,
+                            1,
+                        ),
+                        style,
+                    );
+                }
                 render::put_text(
                     &mut buffer,
                     chat.reader_area.x,
-                    y + 1 + row as u16,
+                    chat.reader_area.y + row as u16,
                     width,
                     line,
-                    base.fg(palette.overlay1),
+                    style,
                 );
             }
         }
@@ -281,7 +275,7 @@ impl ClientShellState {
             let y = if content_end.saturating_add(echo_rows) <= chat.reader_area.bottom() {
                 content_end
             } else {
-                chat.reader_area.bottom() + preview_rows
+                chat.reader_area.bottom()
             };
             for (row, line) in chat
                 .echo_lines
@@ -316,7 +310,7 @@ impl ClientShellState {
                 base.fg(palette.overlay0),
             );
         }
-        if max_offset > 0 && chat.viewport_rows > 0 {
+        if !using_live && max_offset > 0 && chat.viewport_rows > 0 {
             let thumb = (chat.viewport_rows * chat.viewport_rows / chat.wrapped.len()).max(1);
             let position = top * chat.viewport_rows.saturating_sub(thumb) / max_offset;
             for row in 0..chat.viewport_rows {

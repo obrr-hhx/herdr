@@ -6,6 +6,8 @@
 - Local Claude conversation caching uses native-style prompt markers, assistant bullets, tool trees, hanging indentation, highlighted user messages, and a horizontal-rule composer while retaining local input and paged history.
 
 ### Fixed
+- PgUp requested while the newest reply is still reaching saved history is retained and applied after a fresh read instead of being silently ignored.
+- F6 displays the latest received native terminal body while Claude generates output, without waiting for complete transcript records. The remote composer and status footer are excluded; local input remains independent and scrolling opens the saved history. Native response colors are preserved.
 - Rebinding a cached draft after PTY handoff no longer mistakes a new runtime ID for a different Claude conversation or fences its new submission acknowledgement. A changed Claude conversation still requires manual retry.
 - A draft blocked after reconnect or server replacement now shows an accented Ctrl+R editor title and a recovery-first hint, including in narrow panes. Unlocking keeps the draft and never submits it automatically.
 - Local chat clears its temporary sent message when Claude saves multiline paste records with tagged closing markers, avoiding duplicate messages and a stuck history-sync label.

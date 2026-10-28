@@ -716,6 +716,14 @@ pub struct CellData {
 }
 
 impl CellData {
+    pub(crate) fn copy_to_ratatui_cell(&self, cell: &mut ratatui::buffer::Cell) {
+        cell.set_symbol(&self.symbol);
+        cell.fg = u32_to_color(self.fg);
+        cell.bg = u32_to_color(self.bg);
+        cell.modifier = u16_to_modifier(self.modifier);
+        cell.skip = self.skip;
+    }
+
     pub(crate) fn from_ratatui_cell(cell: &ratatui::buffer::Cell) -> Self {
         Self {
             symbol: cell.symbol().to_owned(),
@@ -871,11 +879,7 @@ impl FrameData {
                 let idx = (row as usize) * (self.width as usize) + (col as usize);
                 let cell_data = &self.cells[idx];
                 let cell = buffer.cell_mut((col, row)).expect("cell within bounds");
-                cell.set_symbol(&cell_data.symbol);
-                cell.fg = u32_to_color(cell_data.fg);
-                cell.bg = u32_to_color(cell_data.bg);
-                cell.modifier = u16_to_modifier(cell_data.modifier);
-                cell.skip = cell_data.skip;
+                cell_data.copy_to_ratatui_cell(cell);
             }
         }
 

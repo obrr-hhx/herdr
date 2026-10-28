@@ -283,9 +283,32 @@ fn saved_history_older_request_survives_latest_reply_in_flight_and_keeps_new_rec
         .contains("message 00"));
 }
 
+fn streaming_surface(text: &str, revision: u64) -> crate::protocol::PaneSurfaceFrame {
+    let rule = "─".repeat(60);
+    let lines = [
+        "❯ CURRENT_REMOTE_QUESTION",
+        text,
+        "✻ Cogitating…",
+        &rule,
+        "❯ ",
+        &rule,
+        "Opus 5.5 | main | ctx:4%",
+        "▶▶ auto mode on (shift+tab to cycle)",
+    ];
+    let buffer = Buffer::with_lines(lines);
+    let mut surface = surface();
+    surface.frame = FrameData::from_ratatui_buffer(&buffer, None);
+    surface.surface_revision = revision + 1;
+    surface.panes[0].content_revision = revision;
+    surface.panes[0].inner_rect.width = buffer.area.width;
+    surface.panes[0].inner_rect.height = buffer.area.height;
+    surface.panes[0].rect = surface.panes[0].inner_rect;
+    surface
+}
+
 #[test]
-fn saved_history_live_terminal_tail_is_separate_and_hidden_while_reading() {
-    let (mut state, screen_read) = reader();
+fn live_frames_stream_without_jsonl_and_hide_remote_composer_and_footer() {
+    let (mut state, _) = reader();
     complete(
         &mut state,
         page(
@@ -296,24 +319,45 @@ fn saved_history_live_terminal_tail_is_separate_and_hidden_while_reading() {
         ),
         false,
     );
-    state.snapshot.as_mut().unwrap().agents[0].agent_status =
-        crate::api::schema::AgentStatus::Working;
-    state.handle_endpoint_result(
-        "boot-1",
-        &screen_read,
-        Ok(history("UNSAVED_LIVE_FRAGMENT".into())),
+    state.history_source_enabled = true;
+    state.snapshot.as_mut().unwrap().agents[0].agent_status = AgentStatus::Working;
+    state.set_pane_surface(streaming_surface("⏺ STREAM_FIRST", 1));
+    let now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    state.tick_local_chat(now, &mut ClientShellInput::default());
+    let first = frame_text(&state.compose(106, 30).unwrap());
+    assert!(first.contains("STREAM_FIRST"), "{first}");
+    assert!(
+        !first.contains("saved 79"),
+        "archive and live scene must not be stacked: {first}"
     );
-    let frame = frame_text(&state.compose(106, 30).unwrap());
-    assert!(frame.contains("Working…"));
-    assert!(frame.contains("UNSAVED_LIVE_FRAGMENT"));
+    for controls in ["Opus 5.5 | main", "auto mode on", "Working…"] {
+        assert!(!first.contains(controls), "leaked {controls}: {first}");
+    }
+    assert_eq!(
+        first.matches('❯').count(),
+        2,
+        "only the saved native user prompt and local composer remain: {first}"
+    );
+    state.set_pane_surface(streaming_surface("⏺ STREAM_FIRST_MORE_TOKENS", 2));
+    state.tick_local_chat(
+        now + std::time::Duration::from_millis(120),
+        &mut ClientShellInput::default(),
+    );
+    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("STREAM_FIRST_MORE_TOKENS"));
     assert!(!state
         .local_chat
         .as_ref()
         .unwrap()
         .text
-        .contains("UNSAVED_LIVE_FRAGMENT"));
+        .contains("STREAM_FIRST"));
     press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
-    assert!(!frame_text(&state.compose(106, 30).unwrap()).contains("UNSAVED_LIVE_FRAGMENT"));
+    let reading = frame_text(&state.compose(106, 30).unwrap());
+    assert!(
+        reading.contains("saved ") && !reading.contains("STREAM_FIRST"),
+        "{reading}"
+    );
+    press(&mut state, KeyCode::End, KeyModifiers::CONTROL);
+    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("STREAM_FIRST_MORE_TOKENS"));
 }
 
 #[test]
@@ -681,4 +725,195 @@ fn saved_history_runtime_handoff_does_not_relock_a_rebound_claude_conversation()
         state.local_chat.as_ref().unwrap().draft,
         "manual retry after handoff"
     );
+}
+
+#[test]
+fn live_frames_preserve_native_styles_after_idle_without_replacing_saved_history() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "saved archive")], 0),
+        false,
+    );
+    state.history_source_enabled = true;
+    let mut source = streaming_surface("⏺ FINAL_NATIVE_CONTENT", 1);
+    let mut cells = source.frame.to_ratatui_buffer().unwrap();
+    cells[(0, 1)].set_style(
+        Style::default()
+            .fg(ratatui::style::Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    );
+    source.frame = FrameData::from_ratatui_buffer(&cells, None);
+    let native_color = source.frame.cells[usize::from(source.frame.width)].fg;
+    state.set_pane_surface(source);
+    state.tick_local_chat(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut ClientShellInput::default(),
+    );
+    let frame = state.compose(106, 30).unwrap();
+    assert!(frame_text(&frame).contains("FINAL_NATIVE_CONTENT"));
+    assert!(frame
+        .cells
+        .iter()
+        .any(|cell| cell.symbol == "⏺" && cell.fg == native_color));
+    assert_eq!(
+        state.local_chat.as_ref().unwrap().transcript.records[0].text,
+        "saved archive"
+    );
+    state.snapshot.as_mut().unwrap().agents[0].agent_status = AgentStatus::Blocked;
+    let blocked = frame_text(&state.compose(106, 30).unwrap());
+    assert!(blocked.contains("Needs attention"));
+    assert!(!blocked.contains("FINAL_NATIVE_CONTENT"));
+}
+
+#[test]
+fn wider_stale_native_geometry_falls_back_without_clipping_or_leaking_footer() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "saved narrow archive")], 0),
+        false,
+    );
+    state.history_source_enabled = true;
+    let mut source = streaming_surface(&"x".repeat(120), 1);
+    let mut rows = vec![
+        "x".repeat(120),
+        "─".repeat(120),
+        "❯".into(),
+        "─".repeat(120),
+        "auto mode on".into(),
+    ];
+    source.frame = FrameData::from_ratatui_buffer(&Buffer::with_lines(rows.drain(..)), None);
+    source.panes[0].inner_rect.width = 120;
+    source.panes[0].inner_rect.height = 5;
+    state.set_pane_surface(source);
+    state.tick_local_chat(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut ClientShellInput::default(),
+    );
+    let text = frame_text(&state.compose(80, 24).unwrap());
+    assert!(text.contains("saved narrow archive"), "{text}");
+    assert!(!text.contains("auto mode on"));
+}
+
+#[test]
+fn page_up_during_final_history_flush_is_applied_after_a_fresh_read() {
+    let (mut state, _) = reader();
+    let mut old_records: Vec<_> = (0..80)
+        .map(|i| record(i, "assistant", &format!("old history {i}")))
+        .collect();
+    old_records.push(record(80, "user", "current question awaiting reply"));
+    complete(&mut state, page(old_records, 0), false);
+    state.history_source_enabled = true;
+    state.set_pane_surface(streaming_surface("⏺ NEW_REPLY_STILL_FLUSHING", 1));
+    state.tick_local_chat(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut ClientShellInput::default(),
+    );
+    state.compose(106, 30).unwrap();
+    press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
+    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("Loading saved history"));
+    let mut inflight = page(vec![], 0);
+    inflight.unchanged = true;
+    complete(&mut state, inflight, false);
+    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("Loading saved history"));
+    complete(
+        &mut state,
+        page(
+            (0..100)
+                .map(|i| record(i, "assistant", &format!("FLUSHED_REPLY_{i:03}")))
+                .collect(),
+            0,
+        ),
+        false,
+    );
+    let frame = frame_text(&state.compose(106, 30).unwrap());
+    assert!(
+        frame.contains("Reading ") && frame.contains("FLUSHED_REPLY_"),
+        "{frame}"
+    );
+    assert!(!frame.contains("NEW_REPLY_STILL_FLUSHING"));
+}
+
+#[test]
+#[ignore = "non-gating native live-frame capture/render profile"]
+fn live_surface_render_profile() {
+    for count in [1, 15] {
+        let (mut state, _) = reader();
+        let original = state.snapshot.as_ref().unwrap().panes[0].clone();
+        for index in 1..count {
+            let mut pane = original.clone();
+            pane.pane_id = format!("background-{index}");
+            pane.focused = false;
+            state.snapshot.as_mut().unwrap().panes.push(pane);
+        }
+        complete(
+            &mut state,
+            page(vec![record(0, "assistant", "saved")], 0),
+            false,
+        );
+        state.compose(120, 40).unwrap();
+        state.history_source_enabled = true;
+        let width = usize::from(state.local_chat.as_ref().unwrap().area.width);
+        let mut lines: Vec<String> = (0..25)
+            .map(|i| format!("⏺ native streaming row {i:02} 中文内容"))
+            .collect();
+        let rule = "─".repeat(width);
+        lines.extend([
+            rule.clone(),
+            "❯".into(),
+            rule,
+            "Opus | main | ctx:4%".into(),
+            "auto mode on".into(),
+        ]);
+        let frame = FrameData::from_ratatui_buffer(&Buffer::with_lines(lines), None);
+        let mut samples = Vec::new();
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        for revision in 1..=100 {
+            let mut source = streaming_surface("unused", revision);
+            source.frame = frame.clone();
+            source.panes[0].inner_rect.width = frame.width;
+            source.panes[0].inner_rect.height = frame.height;
+            state.set_pane_surface(source);
+            let start = std::time::Instant::now();
+            state.tick_local_chat(
+                now + std::time::Duration::from_millis(revision * 120),
+                &mut ClientShellInput::default(),
+            );
+            std::hint::black_box(state.compose(120, 40).unwrap());
+            samples.push(start.elapsed().as_micros());
+        }
+        samples.sort_unstable();
+        eprintln!("live_surface panes={count} sample_rows=25 capture_render_p50_us={} capture_render_p95_us={}",samples[50],samples[95]);
+    }
+}
+
+#[test]
+fn a_short_saved_history_stays_readable_while_the_native_reply_keeps_streaming() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "SHORT_SAVED_HISTORY")], 0),
+        false,
+    );
+    state.history_source_enabled = true;
+    state.set_pane_surface(streaming_surface("⏺ UNSAVED_NATIVE_REPLY", 1));
+    state.tick_local_chat(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut ClientShellInput::default(),
+    );
+    state.compose(106, 30).unwrap();
+    press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
+    for _ in 0..2 {
+        let mut same = page(vec![], 0);
+        same.unchanged = true;
+        complete(&mut state, same, false);
+    }
+    let reading = frame_text(&state.compose(106, 30).unwrap());
+    assert!(
+        reading.contains("SHORT_SAVED_HISTORY") && !reading.contains("UNSAVED_NATIVE_REPLY"),
+        "{reading}"
+    );
+    press(&mut state, KeyCode::End, KeyModifiers::CONTROL);
+    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("UNSAVED_NATIVE_REPLY"));
 }

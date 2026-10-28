@@ -9,6 +9,8 @@ use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
 mod echo;
+mod live;
+use live::LiveSurface;
 mod transcript;
 mod view;
 use transcript::{LineKind, Transcript};
@@ -40,6 +42,9 @@ pub(super) struct LocalChat {
     draft_dirty: bool,
     pub(super) width: u16,
     pub(super) offset: usize,
+    reading_history: bool,
+    pending_history_scroll: usize,
+    scroll_waits_for_inflight: bool,
     viewport_rows: usize,
     pub(super) status: String,
     truncated: bool,
@@ -55,7 +60,7 @@ pub(super) struct LocalChat {
     wrapped_styles: Vec<LineKind>,
     pending_document: Option<transcript::Document>,
     document_anchors: Vec<(String, usize)>,
-    live_preview: Vec<String>,
+    live_surface: LiveSurface,
 }
 
 fn wrap(text: &str, width: u16) -> Vec<String> {
@@ -86,18 +91,8 @@ fn wrap(text: &str, width: u16) -> Vec<String> {
 // prompt markers and rules inside actual answers and user messages.
 fn history_text(text: String) -> String {
     let lines: Vec<&str> = text.lines().collect();
-    let rule = |line: &str| {
-        let line = line.trim();
-        !line.is_empty() && line.chars().all(|c| c == '─')
-    };
-    if let Some(index) = lines
-        .windows(3)
-        .rposition(|rows| rule(rows[0]) && rows[1].trim_start().starts_with('❯') && rule(rows[2]))
-    {
-        // Footer controls must be near the tail, not an earlier quoted block.
-        if lines.len().saturating_sub(index) <= 12 {
-            return lines[..index].join("\n").trim_end().to_string();
-        }
+    if let Some(index) = live::composer_start(&lines) {
+        return lines[..index].join("\n").trim_end().to_string();
     }
     text
 }
@@ -190,11 +185,33 @@ impl LocalChat {
     }
 
     fn scroll(&mut self, delta: isize) {
+        if delta > 0 {
+            self.reading_history = true;
+        }
+        let reply_not_saved = self.transcript.tail_is_user();
+        if delta > 0
+            && self.offset == 0
+            && self.live_surface.body.is_some()
+            && (self.wrapped.len() <= self.viewport_rows || reply_not_saved)
+        {
+            if self.pending_history_scroll == 0 {
+                self.scroll_waits_for_inflight = self.transcript.busy;
+            }
+            self.pending_history_scroll =
+                self.pending_history_scroll.saturating_add(delta as usize);
+            self.transcript.want_older = false;
+            self.transcript.next = None;
+            return;
+        }
+        if delta < 0 {
+            self.pending_history_scroll = 0;
+            self.scroll_waits_for_inflight = false;
+        }
         self.offset = self
             .offset
             .saturating_add_signed(delta)
             .min(self.wrapped.len().saturating_sub(self.viewport_rows));
-        if self.offset == 0 {
+        if self.offset == 0 && delta < 0 {
             self.resume_live();
         }
     }
@@ -235,6 +252,10 @@ impl LocalChat {
 
     fn resume_live(&mut self) {
         self.offset = 0;
+        self.reading_history = false;
+        self.transcript.want_older = false;
+        self.pending_history_scroll = 0;
+        self.scroll_waits_for_inflight = false;
         self.resume_transcript();
         if self.transcript.loaded {
             self.transcript.revision.clear();
@@ -293,6 +314,9 @@ impl ClientShellState {
             chat.generation = self.local_chat_generation;
             chat.in_flight = false;
             chat.last_revision = None;
+            chat.live_surface = LiveSurface::default();
+            chat.pending_history_scroll = 0;
+            chat.scroll_waits_for_inflight = false;
             chat.transcript.busy = false;
             chat.transcript.next = None;
             if let Some(sent) = chat.sending.take() {
@@ -381,6 +405,9 @@ impl ClientShellState {
             draft_dirty: true,
             width: 80,
             offset: 0,
+            reading_history: false,
+            pending_history_scroll: 0,
+            scroll_waits_for_inflight: false,
             viewport_rows: 1,
             status: "Loading remote terminal history…".into(),
             truncated: false,
@@ -396,7 +423,7 @@ impl ClientShellState {
             wrapped_styles: Vec::new(),
             pending_document: None,
             document_anchors: Vec::new(),
-            live_preview: Vec::new(),
+            live_surface: LiveSurface::default(),
         });
         self.tick_local_chat(Instant::now(), outcome);
         outcome.repaint = true;
@@ -440,28 +467,11 @@ impl ClientShellState {
             self.refresh_local_chat_surface(now, outcome);
             return;
         }
-        let preview_active = self.snapshot.as_deref().is_some_and(|s| {
-            s.agents.iter().any(|agent| {
-                Some(&agent.pane_id) == s.focused_pane_id.as_ref()
-                    && matches!(
-                        agent.agent_status,
-                        crate::api::schema::AgentStatus::Working
-                            | crate::api::schema::AgentStatus::Blocked
-                    )
-            })
-        });
         if self
             .local_chat
             .as_ref()
-            .is_some_and(|c| c.transcript.loaded)
-            && !preview_active
+            .is_some_and(|chat| chat.transcript.loaded)
         {
-            if let Some(chat) = self.local_chat.as_mut() {
-                if !chat.live_preview.is_empty() {
-                    chat.live_preview.clear();
-                    outcome.repaint = true;
-                }
-            }
             return;
         }
         let Some(chat) = self
@@ -524,20 +534,9 @@ impl ClientShellState {
         };
         chat.in_flight = false;
         if chat.transcript.loaded {
-            if let Ok(ResponseResult::PaneRead { read }) = result {
-                if read.pane_id == chat.pane_id {
-                    let text = history_text(read.text);
-                    chat.live_preview = text
-                        .lines()
-                        .filter(|line| !line.trim().is_empty())
-                        .rev()
-                        .take(5)
-                        .map(|line| line.chars().take(4096).collect::<String>())
-                        .collect();
-                    chat.live_preview.reverse();
-                }
-            }
-            return chat.active && chat.offset == 0;
+            // Once saved history is available, stale screen RPCs must not replace it.
+            // Live output comes exclusively from the already-received pane surface.
+            return false;
         }
         match result {
             Ok(ResponseResult::PaneRead { read }) if read.pane_id == chat.pane_id => {
@@ -713,9 +712,7 @@ impl ClientShellState {
                     KeyCode::Down => chat.move_vertical(false),
                     KeyCode::Left => chat.cursor = chat.previous(),
                     KeyCode::Right => chat.cursor = chat.next(),
-                    KeyCode::Home if ctrl => {
-                        chat.offset = chat.wrapped.len().saturating_sub(chat.viewport_rows)
-                    }
+                    KeyCode::Home if ctrl => chat.scroll(isize::MAX),
                     KeyCode::End if ctrl => chat.resume_live(),
                     KeyCode::Home => {
                         chat.cursor = chat.draft[..chat.cursor].rfind('\n').map_or(0, |n| n + 1)
@@ -798,6 +795,7 @@ impl ClientShellState {
         if upward {
             if let Some(chat) = self.local_chat.as_mut() {
                 chat.request_older();
+                tracing::debug!(target:"herdr::client::diagnostics", rows=chat.wrapped.len(), offset=chat.offset, viewport_rows=chat.viewport_rows, "local history scroll requested");
             }
         }
         outcome.repaint = true;

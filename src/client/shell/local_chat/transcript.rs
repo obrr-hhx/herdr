@@ -32,6 +32,16 @@ pub(in crate::client::shell) struct Transcript {
     pub(in crate::client::shell) records: Vec<HistoryRecord>,
 }
 
+impl Transcript {
+    pub(super) fn tail_is_user(&self) -> bool {
+        self.records
+            .iter()
+            .rev()
+            .find(|record| matches!(record.kind.as_str(), "user" | "assistant"))
+            .is_some_and(|record| record.kind == "user")
+    }
+}
+
 pub(in crate::client::shell) struct Document {
     pub(in crate::client::shell) lines: Vec<(String, LineKind)>,
     pub(in crate::client::shell) anchors: Vec<(String, usize)>,
@@ -203,7 +213,8 @@ impl LocalChat {
     }
 
     pub(in crate::client::shell) fn request_older(&mut self) {
-        if self.transcript.loaded
+        if self.pending_history_scroll == 0
+            && self.transcript.loaded
             && self.transcript.has_older
             && self.offset == self.wrapped.len().saturating_sub(self.viewport_rows)
         {
@@ -221,6 +232,10 @@ impl LocalChat {
         // Endpoint boot/generation already fences the old transport independently.
         let changed_session = self.transcript.loaded && self.transcript.session != page.session_id;
         if changed_session {
+            self.live_surface = LiveSurface::default();
+            self.last_revision = None;
+            self.pending_history_scroll = 0;
+            self.scroll_waits_for_inflight = false;
             if let Some(sent) = self.sending.take() {
                 self.draft = format!(
                     "{sent}{}{}",
@@ -235,6 +250,7 @@ impl LocalChat {
             self.transcript.records.clear();
             self.pending_document = None;
             self.offset = 0;
+            self.reading_history = false;
             if !self.draft.is_empty() {
                 self.uncertain = true;
                 self.status =
@@ -317,7 +333,8 @@ impl LocalChat {
             self.transcript.has_older = self.transcript.before > 0;
         }
         let lines = document(&self.transcript.records);
-        if self.offset > 0 && !older {
+        if (self.offset > 0 || (self.reading_history && self.pending_history_scroll == 0)) && !older
+        {
             self.pending_document = Some(lines);
         } else if self.offset > 0 && older {
             let anchor = self
@@ -398,11 +415,35 @@ impl ClientShellState {
                     .loaded
                     .then(|| chat.transcript.session.clone());
                 let changed = chat.apply_transcript(page, completed.older);
+                tracing::debug!(target:"herdr::client::diagnostics", records=chat.transcript.records.len(), rows=chat.wrapped.len(), offset=chat.offset, older=completed.older, "local history cache refreshed");
+                let mut scroll_updated = false;
+                if chat.pending_history_scroll > 0 {
+                    scroll_updated = true;
+                    let reply_not_saved = chat.transcript.tail_is_user();
+                    if !completed.older
+                        && chat.scroll_waits_for_inflight
+                        && (chat.wrapped.len() <= chat.viewport_rows || reply_not_saved)
+                    {
+                        chat.scroll_waits_for_inflight = false;
+                        chat.transcript.next = None;
+                    } else if chat.wrapped.len() <= chat.viewport_rows && chat.transcript.has_older
+                    {
+                        chat.scroll_waits_for_inflight = false;
+                        chat.transcript.want_older = true;
+                        chat.transcript.next = None;
+                    } else {
+                        chat.scroll_waits_for_inflight = false;
+                        let delta = std::mem::take(&mut chat.pending_history_scroll);
+                        chat.offset =
+                            delta.min(chat.wrapped.len().saturating_sub(chat.viewport_rows));
+                        chat.request_older();
+                    }
+                }
                 if previous_session.is_some_and(|session| session != chat.transcript.session) {
                     self.local_chat_generation = self.local_chat_generation.saturating_add(1);
                     chat.generation = self.local_chat_generation;
                 }
-                chat.active && (changed || status_changed)
+                chat.active && (changed || status_changed || scroll_updated)
             }
             Err(error) => {
                 chat.transcript.next = Some(Instant::now() + Duration::from_secs(5));
