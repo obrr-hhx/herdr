@@ -904,6 +904,8 @@ pub(super) struct ClientCopyModeState {
 }
 
 pub(crate) struct ClientShellState {
+    pub(super) cached_screens: VecDeque<std::sync::Arc<super::activation_preview::CachedScreen>>,
+    pub(super) activation_preview: Option<super::activation_preview::ActivationPreview>,
     pub(super) local_chat: Option<super::local_chat::LocalChat>,
     pub(super) local_chat_generation: u64,
     pub(super) history_source_enabled: bool,
@@ -1061,6 +1063,8 @@ impl ClientShellState {
                 .extend(saved.collapsed_groups);
         }
         Self {
+            cached_screens: VecDeque::new(),
+            activation_preview: None,
             local_chat: None,
             local_chat_generation: 0,
             history_source_enabled: true,

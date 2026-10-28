@@ -99,6 +99,7 @@ impl ClientShellState {
         });
         let width = area.width - 4;
         if width != chat.width {
+            chat.echo_dirty = true;
             chat.draft_dirty = true;
             chat.width = width;
             chat.rewrap_history();
@@ -119,6 +120,21 @@ impl ClientShellState {
             }
             chat.draft_dirty = false;
         }
+        if chat.echo_dirty {
+            chat.echo_lines = chat
+                .echoes
+                .back()
+                .map(|echo| {
+                    let mut lines = wrap(&echo.text, width);
+                    if lines.len() > 6 {
+                        lines.truncate(5);
+                        lines.push("… [message continues]".into());
+                    }
+                    lines
+                })
+                .unwrap_or_default();
+            chat.echo_dirty = false;
+        }
         let cursor_line = chat.draft_prefix.len().saturating_sub(1);
         let draft_rows = chat
             .draft_layout
@@ -132,17 +148,27 @@ impl ClientShellState {
             width,
             box_y.saturating_sub(area.y + 2),
         );
+        let echo_rows = if chat.offset == 0 && !chat.echo_lines.is_empty() {
+            (chat.echo_lines.len() as u16 + 1).min(chat.reader_area.height.saturating_sub(3))
+        } else {
+            0
+        };
         let preview_rows = if (working || blocked)
             && chat.transcript.loaded
             && chat.offset == 0
             && !chat.live_preview.is_empty()
             && chat.reader_area.height > 8
         {
-            (chat.live_preview.len() as u16 + 1).min(6)
+            (chat.live_preview.len() as u16 + 1)
+                .min(6)
+                .min(chat.reader_area.height.saturating_sub(echo_rows + 3))
         } else {
             0
         };
-        chat.reader_area.height = chat.reader_area.height.saturating_sub(preview_rows);
+        chat.reader_area.height = chat
+            .reader_area
+            .height
+            .saturating_sub(preview_rows + echo_rows);
         chat.viewport_rows = usize::from(chat.reader_area.height);
         let max_offset = chat.wrapped.len().saturating_sub(chat.viewport_rows);
         if let Some(anchor) = anchor {
@@ -245,6 +271,47 @@ impl ClientShellState {
                 );
             }
         }
+        if echo_rows > 0 {
+            let content_end = chat.reader_area.y
+                + chat
+                    .wrapped
+                    .len()
+                    .saturating_sub(top)
+                    .min(chat.viewport_rows) as u16;
+            let y = if content_end.saturating_add(echo_rows) <= chat.reader_area.bottom() {
+                content_end
+            } else {
+                chat.reader_area.bottom() + preview_rows
+            };
+            let label = if chat.echoes.back().is_some_and(|echo| echo.acknowledged) {
+                "YOU · sent · syncing history"
+            } else {
+                "YOU · sending…"
+            };
+            render::put_text(
+                &mut buffer,
+                chat.reader_area.x,
+                y,
+                width,
+                label,
+                base.fg(palette.green),
+            );
+            for (row, line) in chat
+                .echo_lines
+                .iter()
+                .take(usize::from(echo_rows - 1))
+                .enumerate()
+            {
+                render::put_text(
+                    &mut buffer,
+                    chat.reader_area.x,
+                    y + 1 + row as u16,
+                    width,
+                    line,
+                    base.fg(palette.green),
+                );
+            }
+        }
         if max_offset > 0 && chat.viewport_rows > 0 {
             let thumb = (chat.viewport_rows * chat.viewport_rows / chat.wrapped.len()).max(1);
             let position = top * chat.viewport_rows.saturating_sub(thumb) / max_offset;
@@ -321,6 +388,7 @@ impl ClientShellState {
             || chat.status.starts_with("Remote server")
             || chat.status.starts_with("Draft limit")
             || chat.status.starts_with("Saved history unavailable")
+            || chat.status.starts_with("Waiting for saved history")
         {
             chat.status.as_str()
         } else if width >= 76 {

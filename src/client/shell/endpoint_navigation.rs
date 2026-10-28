@@ -12,7 +12,8 @@ impl ClientShellState {
     }
 
     pub(super) fn endpoint_workspace_is_draggable(&self, press: &ClientWorkspacePress) -> bool {
-        press.endpoint_id == self.active_endpoint_id
+        self.activation_preview.is_none()
+            && press.endpoint_id == self.active_endpoint_id
             && self
                 .snapshot
                 .as_deref()
@@ -35,7 +36,7 @@ impl ClientShellState {
         press: ClientWorkspacePress,
         outcome: &mut ClientShellInput,
     ) {
-        if press.endpoint_id == self.active_endpoint_id {
+        if self.activation_preview.is_none() && press.endpoint_id == self.active_endpoint_id {
             self.push_endpoint_method(
                 crate::api::schema::Method::WorkspaceFocus(crate::api::schema::WorkspaceTarget {
                     workspace_id: press.workspace_id,
@@ -68,7 +69,9 @@ impl ClientShellState {
             return false;
         };
         let endpoint_id = hit.endpoint_id.clone();
-        if super::contains(hit.collapse_toggle, point) || endpoint_id == self.active_endpoint_id {
+        if super::contains(hit.collapse_toggle, point)
+            || (self.activation_preview.is_none() && endpoint_id == self.active_endpoint_id)
+        {
             if !self.collapsed_endpoints.remove(&endpoint_id) {
                 self.collapsed_endpoints.insert(endpoint_id);
             }
@@ -104,7 +107,7 @@ impl ClientShellState {
             let label = self.endpoint_label(&endpoint_id).to_owned();
             self.receive_endpoint_unavailable(format!("{label} is reconnecting"));
             outcome.repaint = true;
-        } else if endpoint_id == self.active_endpoint_id {
+        } else if self.activation_preview.is_none() && endpoint_id == self.active_endpoint_id {
             self.push_endpoint_method(
                 crate::api::schema::Method::PaneFocus(crate::api::schema::PaneTarget { pane_id }),
                 outcome,
@@ -262,7 +265,7 @@ impl ClientShellState {
             outcome.repaint = true;
             return false;
         }
-        if endpoint_id == self.active_endpoint_id {
+        if self.activation_preview.is_none() && endpoint_id == self.active_endpoint_id {
             let method = match target {
                 ClientEndpointFocusTarget::Workspace(workspace_id) => {
                     crate::api::schema::Method::WorkspaceFocus(

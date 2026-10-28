@@ -8,6 +8,7 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEv
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
 
+mod echo;
 mod transcript;
 mod view;
 use transcript::{LineKind, Transcript};
@@ -18,6 +19,9 @@ const READ_LINES: u32 = 2000;
 const REFRESH: Duration = Duration::from_millis(500);
 
 pub(super) struct LocalChat {
+    echoes: VecDeque<echo::LocalEcho>,
+    echo_dirty: bool,
+    echo_lines: Vec<String>,
     pub(super) active: bool,
     endpoint: ClientEndpointId,
     boot_id: String,
@@ -291,6 +295,7 @@ impl ClientShellState {
             chat.transcript.busy = false;
             chat.transcript.next = None;
             if let Some(sent) = chat.sending.take() {
+                chat.acknowledge_echo(false);
                 chat.draft = format!(
                     "{sent}{}{}",
                     if chat.draft.is_empty() { "" } else { "\n" },
@@ -354,6 +359,9 @@ impl ClientShellState {
         }
         self.local_chat_generation = self.local_chat_generation.saturating_add(1);
         self.local_chat = Some(LocalChat {
+            echoes: VecDeque::new(),
+            echo_dirty: true,
+            echo_lines: Vec::new(),
             active: true,
             endpoint: self.active_endpoint_id.clone(),
             boot_id: snapshot.boot_id.clone(),
@@ -393,7 +401,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn tick_local_chat(&mut self, now: Instant, outcome: &mut ClientShellInput) {
-        if !self.local_chat_matches() {
+        if self.activation_preview.is_some() || !self.local_chat_matches() {
             return;
         }
         let bound_boot = self
@@ -409,7 +417,13 @@ impl ClientShellState {
                 c.active && !c.transcript.busy && c.transcript.next.is_none_or(|next| now >= next)
             }) {
                 chat.transcript.busy = true;
-                chat.transcript.next = Some(now + Duration::from_secs(1));
+                chat.transcript.next = Some(
+                    now + if chat.sending.is_some() || !chat.echoes.is_empty() {
+                        Duration::from_millis(250)
+                    } else {
+                        Duration::from_secs(1)
+                    },
+                );
                 outcome.actions.push(ClientShellAction::ReadAgentHistory {
                     endpoint: chat.endpoint.clone(),
                     boot: chat.boot_id.clone(),
@@ -419,6 +433,10 @@ impl ClientShellState {
                     known: chat.transcript.revision.clone(),
                 });
             }
+        }
+        if self.history_source_enabled {
+            self.refresh_local_chat_surface(now, outcome);
+            return;
         }
         let preview_active = self.snapshot.as_deref().is_some_and(|s| {
             s.agents.iter().any(|agent| {
@@ -545,6 +563,12 @@ impl ClientShellState {
         if chat.draft.trim().is_empty() || chat.sending.is_some() || chat.uncertain {
             return;
         }
+        if chat.echoes.len() >= 16 {
+            if let Some(chat) = self.local_chat.as_mut() {
+                chat.status = "Waiting for saved history to catch up; draft retained".into();
+            }
+            return;
+        }
         if self
             .snapshot
             .as_deref()
@@ -570,6 +594,7 @@ impl ClientShellState {
             outcome,
         ) {
             if let Some(chat) = self.local_chat.as_mut() {
+                chat.stage_echo(text.clone());
                 chat.sending = Some(text);
                 chat.draft.clear();
                 chat.draft_dirty = true;
@@ -591,7 +616,10 @@ impl ClientShellState {
         else {
             return false;
         };
-        let sent = chat.sending.take().unwrap_or_default();
+        let Some(sent) = chat.sending.take() else {
+            return false;
+        };
+        chat.acknowledge_echo(matches!(&result, Ok(ResponseResult::AgentPrompted { .. })));
         match result {
             Ok(ResponseResult::AgentPrompted { .. }) => {
                 chat.status = "Submitted to Claude; waiting for output".into();
@@ -622,6 +650,9 @@ impl ClientShellState {
         event: &RawInputEvent,
         outcome: &mut ClientShellInput,
     ) -> bool {
+        if self.activation_preview.is_some() {
+            return false;
+        }
         if let RawInputEvent::Key(key) = event {
             if key.code == KeyCode::F(6)
                 && key.kind == KeyEventKind::Press

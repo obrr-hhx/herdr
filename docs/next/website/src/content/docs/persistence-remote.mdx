@@ -7,6 +7,9 @@ Herdr keeps panes running in a background server. Your terminal client can detac
 
 For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr](/docs/how-to-work/).
 
+During a machine switch, the client immediately displays a read-only cached view of a previously visited pane, labeled as syncing. Terminal input remains paused until the remote activation and terminal-mode synchronization complete. An unvisited pane displays a waiting view instead of another pane's cached content. These previews stay in memory, bounded to eight screens and 200,000 terminal cells.
+
+
 ## Detach and reattach
 
 Detach the client with `ctrl+b q`; panes and agents keep running. Reattach by running `herdr` again. Stop the session and its panes with `herdr server stop`.

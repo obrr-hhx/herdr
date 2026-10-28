@@ -434,3 +434,148 @@ fn saved_history_recovery_repaints_even_when_file_is_unchanged() {
     assert!(complete(&mut state, same, false));
     assert!(!frame_text(&state.compose(106, 24).unwrap()).contains("unavailable"));
 }
+
+#[test]
+fn saved_history_local_echo_is_visible_before_any_ack_and_deduplicates_on_save() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "previous reply")], 0),
+        false,
+    );
+    state.handle_input_bytes(b"IMMEDIATE_LOCAL_MESSAGE");
+    let sent = press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+    assert!(sent.actions.iter().any(|action|matches!(action,ClientShellAction::Endpoint{request,..} if matches!(request.method,crate::api::schema::Method::AgentPrompt(_)))));
+    let text = frame_text(&state.compose(106, 24).unwrap());
+    assert!(
+        text.contains("IMMEDIATE_LOCAL_MESSAGE") && text.contains("YOU · sending"),
+        "{text}"
+    );
+    complete(
+        &mut state,
+        page(vec![record(1, "user", "IMMEDIATE_LOCAL_MESSAGE")], 0),
+        false,
+    );
+    let text = frame_text(&state.compose(106, 24).unwrap());
+    assert_eq!(text.matches("IMMEDIATE_LOCAL_MESSAGE").count(), 1, "{text}");
+    assert!(!text.contains("YOU · sending"));
+}
+
+#[test]
+fn saved_history_failed_echo_restores_draft_without_a_fake_sent_message() {
+    let (mut state, _) = reader();
+    state.handle_input_bytes(b"KEEP_UNCONFIRMED");
+    press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+    state.complete_local_chat_send(
+        state.local_chat_generation,
+        Err(ClientShellEndpointError {
+            code: None,
+            message: "test disconnect".into(),
+        }),
+    );
+    let text = frame_text(&state.compose(106, 24).unwrap());
+    assert!(
+        text.contains("KEEP_UNCONFIRMED") && text.contains("Send not confirmed"),
+        "{text}"
+    );
+    assert!(!text.contains("YOU · sending") && !text.contains("YOU · sent"));
+}
+
+#[test]
+fn saved_history_surface_preview_does_not_queue_reads_ahead_of_prompt() {
+    let (mut state, id) = reader();
+    state.handle_endpoint_result("boot-1", &id, Ok(history("initial screen".into())));
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "saved")], 0),
+        false,
+    );
+    state.snapshot.as_mut().unwrap().agents[0].agent_status = AgentStatus::Working;
+    state.pane_surface.as_mut().unwrap().panes[0].content_revision = 42;
+    state.history_source_enabled = true;
+    let mut outcome = ClientShellInput::default();
+    state.tick_local_chat(std::time::Instant::now(), &mut outcome);
+    assert!(!outcome.actions.iter().any(|action|matches!(action,ClientShellAction::Endpoint{request,..} if matches!(request.method,crate::api::schema::Method::PaneRead(_)))));
+    state.handle_input_bytes(b"SEND_WITHOUT_READ_QUEUE");
+    let sent = press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+    assert!(sent.actions.iter().any(|action|matches!(action,ClientShellAction::Endpoint{request,..} if matches!(request.method,crate::api::schema::Method::AgentPrompt(_)))));
+}
+
+#[test]
+fn saved_history_echo_is_not_confirmed_by_an_older_identical_message() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(1, "user", "repeat exactly")], 0),
+        false,
+    );
+    state.handle_input_bytes(b"repeat exactly");
+    press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+    complete(
+        &mut state,
+        page(vec![record(1, "user", "repeat exactly")], 0),
+        false,
+    );
+    assert!(frame_text(&state.compose(106, 24).unwrap()).contains("YOU · sending"));
+    complete(
+        &mut state,
+        page(vec![record(2, "user", "repeat exactly")], 0),
+        false,
+    );
+    let text = frame_text(&state.compose(106, 24).unwrap());
+    assert!(!text.contains("YOU · sending"));
+    assert_eq!(text.matches("repeat exactly").count(), 2);
+}
+
+#[test]
+fn saved_history_cached_preview_keeps_the_local_reader_pixels() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "PRESERVE_READER_PIXELS")], 0),
+        false,
+    );
+    state.compose(160, 48).unwrap();
+    // F6 remains locally renderable while a resized terminal surface is in flight.
+    state.pane_surface = None;
+    state.remember_endpoint_screen(160, 48);
+    state.start_activation_preview(&ClientEndpointId::Local, None);
+    let text = frame_text(&state.compose(160, 48).unwrap());
+    assert!(text.contains("PRESERVE_READER_PIXELS"), "{text}");
+    assert!(text.contains("keyboard input paused"), "{text}");
+}
+
+#[test]
+fn saved_history_session_change_fences_an_old_send_ack_from_manual_retry() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "old session")], 0),
+        false,
+    );
+    state.handle_input_bytes(b"preserve this submit");
+    press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+    let old_generation = state.local_chat_generation;
+    let mut replacement = page(vec![record(0, "assistant", "new session")], 0);
+    replacement.session_id = "replacement".into();
+    complete(&mut state, replacement, false);
+    assert_ne!(old_generation, state.local_chat_generation);
+    assert_eq!(
+        state.local_chat.as_ref().unwrap().draft,
+        "preserve this submit"
+    );
+    press(&mut state, KeyCode::Char('r'), KeyModifiers::CONTROL);
+    press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+    assert!(!state.complete_local_chat_send(
+        old_generation,
+        Err(ClientShellEndpointError {
+            code: None,
+            message: "late old result".into()
+        })
+    ));
+    let text = frame_text(&state.compose(106, 24).unwrap());
+    assert!(
+        text.contains("YOU · sending") && !text.contains("late old result"),
+        "{text}"
+    );
+}

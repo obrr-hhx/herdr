@@ -196,6 +196,21 @@ fn install_pending_activation(
     *pending = Some(activation);
 }
 
+fn show_activation_preview(
+    state: &mut ClientState,
+    endpoint: &endpoint::ClientEndpointId,
+    focus: Option<&shell::ClientEndpointFocusTarget>,
+) {
+    let frame = state.shell.as_mut().and_then(|shell| {
+        shell.start_activation_preview(endpoint, focus);
+        shell.compose(state.reported_size.0, state.reported_size.1)
+    });
+    if let Some(frame) = frame {
+        debug!(target:"herdr::client::diagnostics",nonblank=frame.cells.iter().filter(|c|!c.symbol.trim().is_empty()).count(),"activation preview presented");
+        state.present_frozen_chrome(frame);
+    }
+}
+
 pub(super) fn begin_endpoint_activation(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,
@@ -209,6 +224,8 @@ pub(super) fn begin_endpoint_activation(
 ) -> Result<(), ClientError> {
     tracing::info!(endpoint = ?endpoint_id, pending = pending.is_some(), "client requested machine switch");
     if let Some(activation) = pending.as_mut() {
+        let preview_endpoint = endpoint_id.clone();
+        let preview_target = target.clone();
         if activation.can_retarget(&endpoint_id) {
             let retarget_error = activation.retarget(target, endpoints).err();
             if let Some(error) = retarget_error {
@@ -218,6 +235,7 @@ pub(super) fn begin_endpoint_activation(
             state.requested_activation = Some(activation.supersede(endpoint_id, target, endpoints));
             *pending = None;
         }
+        show_activation_preview(state, &preview_endpoint, preview_target.as_ref());
         return Ok(());
     }
     let already_active = !force
@@ -244,6 +262,9 @@ pub(super) fn begin_endpoint_activation(
         }
         return Ok(());
     }
+    if let Some(shell) = state.shell.as_mut() {
+        shell.remember_endpoint_screen(state.reported_size.0, state.reported_size.1);
+    }
     let Some(shell) = state.shell.as_ref() else {
         return Ok(());
     };
@@ -259,18 +280,21 @@ pub(super) fn begin_endpoint_activation(
         shell,
         endpoints,
         endpoint_id.clone(),
-        target,
+        target.clone(),
         resize,
         *next_surface_serial,
         now,
     ) {
-        Ok(activation) => install_pending_activation(
-            state,
-            endpoint_commands,
-            pending,
-            next_surface_serial,
-            activation,
-        ),
+        Ok(activation) => {
+            install_pending_activation(
+                state,
+                endpoint_commands,
+                pending,
+                next_surface_serial,
+                activation,
+            );
+            show_activation_preview(state, &endpoint_id, target.as_ref());
+        }
         Err(endpoint::ActivationBeginError::Preflight(error)) => {
             if let Some(shell) = state.shell.as_mut() {
                 shell.receive_endpoint_unavailable(format!(
@@ -352,6 +376,9 @@ pub(super) fn complete_endpoint_activation(
         }
         // The coherent target frame can replace the frozen source now, but the registry keeps
         // pane input disabled until a second projection epoch has replayed host modes/effects.
+        if let Some(shell) = state.shell.as_mut() {
+            shell.clear_activation_preview();
+        }
         state.unfreeze_presentation();
         let (cleanup, frame) = {
             let shell = state.shell.as_mut().expect("checked client shell");
@@ -371,6 +398,9 @@ pub(super) fn complete_endpoint_activation(
     }
 
     let _ = pending.take();
+    if let Some(shell) = state.shell.as_mut() {
+        shell.clear_activation_preview();
+    }
     endpoints.unfreeze_input();
     debug!(target: "herdr::client::diagnostics", endpoint = ?endpoints.active_id(),
         restored_source = matches!(completion, endpoint::ActivationCompletion::RestoredSource { .. }),
@@ -407,6 +437,7 @@ pub(super) fn present_handoff_unavailable(state: &mut ClientState, message: Stri
     // source output blocked, while allowing this client-owned chrome frame through the freeze.
     state.freeze_presentation();
     let frame = state.shell.as_mut().and_then(|shell| {
+        shell.clear_activation_preview();
         shell.receive_endpoint_unavailable(message);
         shell.compose(state.reported_size.0, state.reported_size.1)
     });
@@ -741,7 +772,12 @@ pub(super) fn finish_client_shell_input(
         write_to_server(endpoints, &request).map_err(ClientError::ConnectionLost)?;
     }
     if let Some(frame) = frame {
-        if pending_activation.is_some() {
+        if pending_activation.is_some()
+            && state
+                .shell
+                .as_ref()
+                .is_some_and(|shell| !shell.has_activation_preview())
+        {
             state.present_frame(frame);
         } else {
             state.present_frozen_chrome(frame);

@@ -135,6 +135,17 @@ impl LocalChat {
             && (self.transcript.session != page.session_id
                 || self.transcript.terminal != page.terminal_id);
         if changed_session {
+            if let Some(sent) = self.sending.take() {
+                self.draft = format!(
+                    "{sent}{}{}",
+                    if self.draft.is_empty() { "" } else { "\n" },
+                    self.draft
+                );
+                self.cursor = self.draft.len();
+                self.draft_dirty = true;
+            }
+            self.echoes.clear();
+            self.echo_dirty = true;
             self.transcript.records.clear();
             self.pending_document = None;
             self.offset = 0;
@@ -146,6 +157,7 @@ impl LocalChat {
             }
         }
         let first = !self.transcript.loaded || changed_session;
+        self.confirm_echoes(&page.records);
         let metadata_changed = first
             || (older
                 && (self.transcript.before != page.before
@@ -297,7 +309,19 @@ impl ClientShellState {
                 if status_changed {
                     chat.status = "Saved conversation history loaded".into();
                 }
+                let previous_session = chat.transcript.loaded.then(|| {
+                    (
+                        chat.transcript.session.clone(),
+                        chat.transcript.terminal.clone(),
+                    )
+                });
                 let changed = chat.apply_transcript(page, completed.older);
+                if previous_session.is_some_and(|(session, terminal)| {
+                    session != chat.transcript.session || terminal != chat.transcript.terminal
+                }) {
+                    self.local_chat_generation = self.local_chat_generation.saturating_add(1);
+                    chat.generation = self.local_chat_generation;
+                }
                 chat.active && (changed || status_changed)
             }
             Err(error) => {
