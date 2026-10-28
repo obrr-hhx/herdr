@@ -353,7 +353,7 @@ fn live_frames_stream_without_jsonl_and_hide_remote_composer_and_footer() {
     press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
     let reading = frame_text(&state.compose(106, 30).unwrap());
     assert!(
-        reading.contains("saved ") && !reading.contains("STREAM_FIRST"),
+        reading.contains("STREAM_FIRST_MORE_TOKENS") && !reading.contains("saved 79"),
         "{reading}"
     );
     press(&mut state, KeyCode::End, KeyModifiers::CONTROL);
@@ -763,11 +763,11 @@ fn live_frames_preserve_native_styles_after_idle_without_replacing_saved_history
     state.snapshot.as_mut().unwrap().agents[0].agent_status = AgentStatus::Blocked;
     let blocked = frame_text(&state.compose(106, 30).unwrap());
     assert!(blocked.contains("Needs attention"));
-    assert!(!blocked.contains("FINAL_NATIVE_CONTENT"));
+    assert!(blocked.contains("FINAL_NATIVE_CONTENT"));
 }
 
 #[test]
-fn wider_stale_native_geometry_falls_back_without_clipping_or_leaking_footer() {
+fn wider_stale_native_geometry_retains_the_native_scene_without_leaking_footer() {
     let (mut state, _) = reader();
     complete(
         &mut state,
@@ -792,47 +792,43 @@ fn wider_stale_native_geometry_falls_back_without_clipping_or_leaking_footer() {
         &mut ClientShellInput::default(),
     );
     let text = frame_text(&state.compose(80, 24).unwrap());
-    assert!(text.contains("saved narrow archive"), "{text}");
+    assert!(text.contains("xxxxxxxx"), "{text}");
+    assert!(!text.contains("saved narrow archive"), "{text}");
     assert!(!text.contains("auto mode on"));
 }
 
 #[test]
-fn page_up_during_final_history_flush_is_applied_after_a_fresh_read() {
+fn scrolling_does_not_swap_the_native_scene_for_a_later_history_reply() {
     let (mut state, _) = reader();
-    let mut old_records: Vec<_> = (0..80)
-        .map(|i| record(i, "assistant", &format!("old history {i}")))
-        .collect();
-    old_records.push(record(80, "user", "current question awaiting reply"));
-    complete(&mut state, page(old_records, 0), false);
-    state.history_source_enabled = true;
-    state.set_pane_surface(streaming_surface("⏺ NEW_REPLY_STILL_FLUSHING", 1));
-    state.tick_local_chat(
-        std::time::Instant::now() + std::time::Duration::from_secs(1),
-        &mut ClientShellInput::default(),
-    );
-    state.compose(106, 30).unwrap();
-    press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
-    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("Loading saved history"));
-    let mut inflight = page(vec![], 0);
-    inflight.unchanged = true;
-    complete(&mut state, inflight, false);
-    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("Loading saved history"));
     complete(
         &mut state,
-        page(
-            (0..100)
-                .map(|i| record(i, "assistant", &format!("FLUSHED_REPLY_{i:03}")))
-                .collect(),
-            0,
-        ),
+        page(vec![record(0, "user", "current question")], 0),
         false,
     );
-    let frame = frame_text(&state.compose(106, 30).unwrap());
-    assert!(
-        frame.contains("Reading ") && frame.contains("FLUSHED_REPLY_"),
-        "{frame}"
+    state.history_source_enabled = true;
+    state.set_pane_surface(streaming_surface("⏺ NEW_REPLY_STILL_FLUSHING", 1));
+    let now = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    state.tick_local_chat(now, &mut ClientShellInput::default());
+    state.compose(106, 30).unwrap();
+    press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
+    let before = frame_text(&state.compose(106, 30).unwrap());
+    complete(
+        &mut state,
+        page(vec![record(1, "assistant", "FLUSHED_REPLY")], 0),
+        false,
     );
-    assert!(!frame.contains("NEW_REPLY_STILL_FLUSHING"));
+    state.set_pane_surface(streaming_surface("⏺ NEW_REPLY_ADDITIONAL_TOKENS", 2));
+    state.tick_local_chat(
+        now + std::time::Duration::from_millis(150),
+        &mut ClientShellInput::default(),
+    );
+    let after = frame_text(&state.compose(106, 30).unwrap());
+    assert!(before.contains("NEW_REPLY_STILL_FLUSHING"));
+    assert!(after.contains("NEW_REPLY_STILL_FLUSHING"));
+    assert!(!after.contains("FLUSHED_REPLY"));
+    assert!(!after.contains("NEW_REPLY_ADDITIONAL_TOKENS"));
+    press(&mut state, KeyCode::End, KeyModifiers::CONTROL);
+    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("NEW_REPLY_ADDITIONAL_TOKENS"));
 }
 
 #[test]
@@ -889,7 +885,7 @@ fn live_surface_render_profile() {
 }
 
 #[test]
-fn a_short_saved_history_stays_readable_while_the_native_reply_keeps_streaming() {
+fn short_native_reading_stays_frozen_even_when_its_scroll_offset_is_zero() {
     let (mut state, _) = reader();
     complete(
         &mut state,
@@ -911,9 +907,41 @@ fn a_short_saved_history_stays_readable_while_the_native_reply_keeps_streaming()
     }
     let reading = frame_text(&state.compose(106, 30).unwrap());
     assert!(
-        reading.contains("SHORT_SAVED_HISTORY") && !reading.contains("UNSAVED_NATIVE_REPLY"),
+        !reading.contains("SHORT_SAVED_HISTORY") && reading.contains("UNSAVED_NATIVE_REPLY"),
         "{reading}"
     );
     press(&mut state, KeyCode::End, KeyModifiers::CONTROL);
     assert!(frame_text(&state.compose(106, 30).unwrap()).contains("UNSAVED_NATIVE_REPLY"));
+}
+
+#[test]
+fn sending_and_scrolling_keep_native_context_in_the_same_reader_rectangle() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(vec![record(0, "assistant", "DIFFERENT_ARCHIVE_LAYOUT")], 0),
+        false,
+    );
+    state.history_source_enabled = true;
+    state.set_pane_surface(streaming_surface("⏺ NATIVE_CONTEXT_MUST_REMAIN", 1));
+    state.tick_local_chat(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut ClientShellInput::default(),
+    );
+    let before = frame_text(&state.compose(106, 30).unwrap());
+    let rect = state.local_chat.as_ref().unwrap().reader_area;
+    assert!(before.contains("NATIVE_CONTEXT_MUST_REMAIN"));
+    state.handle_input_bytes(b"new local message");
+    press(&mut state, KeyCode::Enter, KeyModifiers::empty());
+    let sending = frame_text(&state.compose(106, 30).unwrap());
+    assert!(sending.contains("NATIVE_CONTEXT_MUST_REMAIN"), "{sending}");
+    assert!(sending.contains("new local message"));
+    assert!(!sending.contains("DIFFERENT_ARCHIVE_LAYOUT"));
+    assert_eq!(state.local_chat.as_ref().unwrap().reader_area.x, rect.x);
+    assert_eq!(state.local_chat.as_ref().unwrap().reader_area.y, rect.y);
+    press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
+    let reading = frame_text(&state.compose(106, 30).unwrap());
+    assert!(reading.contains("NATIVE_CONTEXT_MUST_REMAIN"), "{reading}");
+    assert!(!reading.contains("DIFFERENT_ARCHIVE_LAYOUT"));
+    assert_eq!(state.local_chat.as_ref().unwrap().reader_area, rect);
 }

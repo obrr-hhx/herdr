@@ -29,6 +29,8 @@ pub(in crate::client::shell) struct LocalEcho {
     pub(super) text: String,
     pub(super) acknowledged: bool,
     after: Option<u64>,
+    pub(super) native_seen: bool,
+    pub(super) surface_revision: Option<u64>,
     started: Instant,
 }
 
@@ -37,6 +39,8 @@ impl LocalChat {
         self.echoes.push_back(LocalEcho {
             text,
             acknowledged: false,
+            native_seen: false,
+            surface_revision: self.last_revision,
             after: self.transcript.records.iter().map(|r| r.offset).max(),
             started: Instant::now(),
         });

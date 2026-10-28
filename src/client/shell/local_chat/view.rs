@@ -127,6 +127,7 @@ impl ClientShellState {
             chat.echo_lines = chat
                 .echoes
                 .back()
+                .filter(|echo| !echo.native_seen)
                 .map(|echo| {
                     let mut lines = wrap(&echo.text, width.saturating_sub(2));
                     if lines.len() > 6 {
@@ -151,16 +152,8 @@ impl ClientShellState {
         let box_y = area.bottom() - draft_rows as u16 - 3;
         // The latest view reuses native body cells at their native width. Do not clip a
         // wider stale geometry or stack another copy of the transcript underneath it.
-        let using_live = !chat.reading_history
-            && chat.offset == 0
-            && chat.pending_history_scroll == 0
-            && !blocked
-            && chat.echoes.is_empty()
-            && chat
-                .live_surface
-                .body
-                .as_ref()
-                .is_some_and(|body| body.area.width <= area.width);
+        let using_live = chat.live_surface.body.is_some();
+        // One fixed reader rectangle throughout sending, streaming, and scrolling.
         chat.reader_area = if using_live {
             Rect::new(area.x, area.y, area.width, box_y.saturating_sub(area.y))
         } else {
@@ -171,15 +164,21 @@ impl ClientShellState {
                 box_y.saturating_sub(area.y + 2),
             )
         };
-        let echo_rows = if chat.offset == 0 && !chat.echo_lines.is_empty() {
+        let echo_rows = if !chat.reading_history && chat.offset == 0 && !chat.echo_lines.is_empty()
+        {
             (chat.echo_lines.len() as u16 + 1).min(chat.reader_area.height.saturating_sub(3))
         } else {
             0
         };
         chat.reader_area.height = chat.reader_area.height.saturating_sub(echo_rows);
         chat.viewport_rows = usize::from(chat.reader_area.height);
-        let max_offset = chat.wrapped.len().saturating_sub(chat.viewport_rows);
-        if let Some(anchor) = anchor {
+        let reader_rows = if using_live {
+            chat.live_surface.row_count()
+        } else {
+            chat.wrapped.len()
+        };
+        let max_offset = reader_rows.saturating_sub(chat.viewport_rows);
+        if let Some(anchor) = anchor.filter(|_| !using_live) {
             let top = chat
                 .history_row_starts
                 .partition_point(|position| *position <= anchor)
@@ -188,16 +187,14 @@ impl ClientShellState {
         }
         chat.offset = chat.offset.min(max_offset);
         let top = max_offset.saturating_sub(chat.offset);
-        let indicator = if chat.pending_history_scroll > 0 {
-            "Loading saved history…".to_string()
-        } else if chat.pending_history.is_some() || chat.pending_document.is_some() {
+        let indicator = if chat.pending_history.is_some() || chat.pending_document.is_some() {
             "Reading · New output ↓".to_string()
         } else if chat.reading_history || chat.offset > 0 {
             format!(
                 "Reading {}–{} / {}",
                 top + 1,
-                (top + chat.viewport_rows).min(chat.wrapped.len()),
-                chat.wrapped.len()
+                (top + chat.viewport_rows).min(reader_rows),
+                reader_rows
             )
         } else if blocked {
             "Needs attention · Esc terminal".to_string()
@@ -220,13 +217,33 @@ impl ClientShellState {
             );
         }
         if using_live {
-            if let Some(body) = chat.live_surface.body.as_ref() {
-                let source_top = body.area.height.saturating_sub(chat.reader_area.height);
-                let rows = body.area.height.min(chat.reader_area.height);
-                for row in 0..rows {
-                    for col in 0..body.area.width {
-                        buffer[(chat.reader_area.x + col, chat.reader_area.y + row)] =
-                            body[(col, source_top + row)].clone();
+            let source_top = reader_rows
+                .saturating_sub(chat.viewport_rows)
+                .saturating_sub(chat.offset);
+            for row in 0..chat.viewport_rows.min(reader_rows) {
+                let index = source_top + row;
+                if index < chat.live_surface.saved_prefix {
+                    if let Some(line) = chat.wrapped.get(index) {
+                        let kind = chat.wrapped_styles.get(index).copied().unwrap_or_default();
+                        render::put_text(
+                            &mut buffer,
+                            chat.reader_area.x + 2,
+                            chat.reader_area.y + row as u16,
+                            width,
+                            line,
+                            transcript::line_style(kind, palette),
+                        );
+                    }
+                } else if let Some(cells) = chat.live_surface.row(index) {
+                    for (col, cell) in cells
+                        .iter()
+                        .take(usize::from(chat.reader_area.width))
+                        .enumerate()
+                    {
+                        buffer[(
+                            chat.reader_area.x + col as u16,
+                            chat.reader_area.y + row as u16,
+                        )] = cell.clone();
                     }
                 }
             }
@@ -266,12 +283,8 @@ impl ClientShellState {
             }
         }
         if echo_rows > 0 {
-            let content_end = chat.reader_area.y
-                + chat
-                    .wrapped
-                    .len()
-                    .saturating_sub(top)
-                    .min(chat.viewport_rows) as u16;
+            let content_end =
+                chat.reader_area.y + reader_rows.saturating_sub(top).min(chat.viewport_rows) as u16;
             let y = if content_end.saturating_add(echo_rows) <= chat.reader_area.bottom() {
                 content_end
             } else {
@@ -372,7 +385,10 @@ impl ClientShellState {
                 render::put_text(&mut buffer, chat.editor_area.x, y, width, line, base);
             }
         }
-        let help = if chat.uncertain
+        let live_help = format!("{} · Ctrl+End live · Esc terminal", indicator);
+        let help = if using_live && (chat.reading_history || blocked) && !chat.uncertain {
+            live_help.as_str()
+        } else if chat.uncertain
             || chat.status.starts_with("History unavailable")
             || chat.status.starts_with("Remote server")
             || chat.status.starts_with("Draft limit")

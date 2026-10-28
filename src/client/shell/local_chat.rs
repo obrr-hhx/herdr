@@ -43,8 +43,6 @@ pub(super) struct LocalChat {
     pub(super) width: u16,
     pub(super) offset: usize,
     reading_history: bool,
-    pending_history_scroll: usize,
-    scroll_waits_for_inflight: bool,
     viewport_rows: usize,
     pub(super) status: String,
     truncated: bool,
@@ -185,27 +183,23 @@ impl LocalChat {
     }
 
     fn scroll(&mut self, delta: isize) {
-        if delta > 0 {
-            self.reading_history = true;
-        }
-        let reply_not_saved = self.transcript.tail_is_user();
-        if delta > 0
-            && self.offset == 0
-            && self.live_surface.body.is_some()
-            && (self.wrapped.len() <= self.viewport_rows || reply_not_saved)
-        {
-            if self.pending_history_scroll == 0 {
-                self.scroll_waits_for_inflight = self.transcript.busy;
+        if self.live_surface.body.is_some() {
+            if delta > 0 {
+                self.reading_history = true;
+                self.live_surface.freeze(&self.wrapped);
             }
-            self.pending_history_scroll =
-                self.pending_history_scroll.saturating_add(delta as usize);
-            self.transcript.want_older = false;
-            self.transcript.next = None;
+            self.offset = self.offset.saturating_add_signed(delta).min(
+                self.live_surface
+                    .row_count()
+                    .saturating_sub(self.viewport_rows),
+            );
+            if delta < 0 && self.offset == 0 {
+                self.resume_live();
+            }
             return;
         }
-        if delta < 0 {
-            self.pending_history_scroll = 0;
-            self.scroll_waits_for_inflight = false;
+        if delta > 0 {
+            self.reading_history = true;
         }
         self.offset = self
             .offset
@@ -253,9 +247,8 @@ impl LocalChat {
     fn resume_live(&mut self) {
         self.offset = 0;
         self.reading_history = false;
+        self.live_surface.resume();
         self.transcript.want_older = false;
-        self.pending_history_scroll = 0;
-        self.scroll_waits_for_inflight = false;
         self.resume_transcript();
         if self.transcript.loaded {
             self.transcript.revision.clear();
@@ -315,8 +308,6 @@ impl ClientShellState {
             chat.in_flight = false;
             chat.last_revision = None;
             chat.live_surface = LiveSurface::default();
-            chat.pending_history_scroll = 0;
-            chat.scroll_waits_for_inflight = false;
             chat.transcript.busy = false;
             chat.transcript.next = None;
             if let Some(sent) = chat.sending.take() {
@@ -406,8 +397,6 @@ impl ClientShellState {
             width: 80,
             offset: 0,
             reading_history: false,
-            pending_history_scroll: 0,
-            scroll_waits_for_inflight: false,
             viewport_rows: 1,
             status: "Loading remote terminal history…".into(),
             truncated: false,
