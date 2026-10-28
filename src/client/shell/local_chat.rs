@@ -4,9 +4,11 @@ use crate::api::schema::{
     AgentPromptParams, Method, PaneReadParams, ReadFormat, ReadSource, ResponseResult,
 };
 use crate::raw_input::RawInputEvent;
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthChar;
+
+mod view;
 
 const MAX_DRAFT_BYTES: usize = 64 * 1024;
 const MAX_CACHE_BYTES: usize = 1024 * 1024;
@@ -29,7 +31,7 @@ pub(super) struct LocalChat {
     draft_layout: Vec<String>,
     draft_prefix: Vec<String>,
     draft_dirty: bool,
-    width: u16,
+    pub(super) width: u16,
     pub(super) offset: usize,
     viewport_rows: usize,
     pub(super) status: String,
@@ -37,7 +39,10 @@ pub(super) struct LocalChat {
     in_flight: bool,
     last_revision: Option<u64>,
     next_refresh: Instant,
-    area: Rect,
+    pub(super) area: Rect,
+    pub(super) reader_area: Rect,
+    pub(super) editor_area: Rect,
+    draft_top: usize,
 }
 
 fn wrap(text: &str, width: u16) -> Vec<String> {
@@ -62,6 +67,82 @@ fn wrap(text: &str, width: u16) -> Vec<String> {
         }
     }
     lines
+}
+
+// Only remove Claude's framed composer control at the very end. Preserve
+// prompt markers and rules inside actual answers and user messages.
+fn history_text(text: String) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    let rule = |line: &str| {
+        let line = line.trim();
+        !line.is_empty() && line.chars().all(|c| c == '─')
+    };
+    if let Some(index) = lines
+        .windows(3)
+        .rposition(|rows| rule(rows[0]) && rows[1].trim_start().starts_with('❯') && rule(rows[2]))
+    {
+        // Footer controls must be near the tail, not an earlier quoted block.
+        if lines.len().saturating_sub(index) <= 12 {
+            return lines[..index].join("\n").trim_end().to_string();
+        }
+    }
+    text
+}
+
+fn merge_history(previous: &str, incoming: String) -> (String, bool) {
+    if previous.is_empty() || incoming == previous {
+        return (incoming, false);
+    }
+    if incoming.trim().is_empty() {
+        return (previous.to_owned(), false);
+    }
+    let mut nonempty = 0;
+    let mut end = 0;
+    let mut start = None;
+    for line in incoming.split_inclusive('\n') {
+        if !line.trim().is_empty() {
+            start.get_or_insert(end);
+            nonempty += 1;
+        }
+        end += line.len();
+        if nonempty == 3 {
+            break;
+        }
+    }
+    if let Some(start) = start {
+        let anchor = &incoming[start..end];
+        // Three complete, nonempty lines are evidence for the same terminal window.
+        // Short/repeated spinner fragments are not safe overlap anchors.
+        if nonempty >= 3 && anchor.len() >= 24 {
+            if let Some(at) = previous.rfind(anchor) {
+                return (format!("{}{}", &previous[..at], &incoming[start..]), false);
+            }
+        }
+    }
+    (incoming, true)
+}
+
+fn wrap_starts(text: &str, width: u16) -> Vec<usize> {
+    let mut starts = vec![0];
+    let mut column = 0;
+    for (index, ch) in text.char_indices() {
+        if ch == '\n' {
+            starts.push(index + 1);
+            column = 0;
+        } else if !ch.is_control() || ch == '\t' {
+            let cells = if ch == '\t' {
+                1
+            } else {
+                ch.width().unwrap_or(0)
+            };
+            if column + cells > usize::from(width.max(1)) && column > 0 {
+                starts.push(index);
+                column = 0;
+            }
+            column += cells;
+        }
+    }
+    starts
 }
 
 impl LocalChat {
@@ -105,7 +186,20 @@ impl LocalChat {
         }
     }
 
-    fn update_text(&mut self, mut text: String, truncated: bool) {
+    fn update_text(&mut self, text: String, truncated: bool) {
+        let incoming = history_text(text);
+        let previous = self
+            .pending_history
+            .as_ref()
+            .map_or(self.text.as_str(), |(text, _)| text.as_str());
+        let (mut text, gap) = merge_history(previous, incoming);
+        let mut truncated = truncated || gap;
+        // Retain at most 2,000 real terminal lines across overlapping alternate-screen
+        // windows. No guessed user/assistant messages or screenshot concatenation.
+        if let Some((cut, _)) = text.match_indices('\n').rev().nth(2000) {
+            text.drain(..cut + 1);
+            truncated = true;
+        }
         let mut cut = text.len().saturating_sub(MAX_CACHE_BYTES);
         while !text.is_char_boundary(cut) {
             cut += 1;
@@ -113,7 +207,7 @@ impl LocalChat {
         if cut > 0 {
             text.drain(..cut);
         }
-        let truncated = truncated || cut > 0;
+        let truncated = truncated || cut > 0 || self.truncated;
         if self.offset > 0 {
             self.pending_history = (self.text != text).then_some((text, truncated));
             return;
@@ -134,39 +228,33 @@ impl LocalChat {
     }
 
     fn move_vertical(&mut self, up: bool) {
-        let start = self.draft[..self.cursor].rfind('\n').map_or(0, |p| p + 1);
-        let column = self.draft[start..self.cursor].chars().count();
-        let (target, end) = if up {
-            if start == 0 {
-                return;
-            }
-            let end = start - 1;
-            (self.draft[..end].rfind('\n').map_or(0, |p| p + 1), end)
+        let mut prefix = wrap(&self.draft[..self.cursor], self.width);
+        if prefix
+            .last()
+            .is_some_and(|line| UnicodeWidthStr::width(line.as_str()) == usize::from(self.width))
+        {
+            prefix.push(String::new());
+        }
+        let row = prefix.len().saturating_sub(1);
+        let column = prefix
+            .last()
+            .map_or(0, |line| UnicodeWidthStr::width(line.as_str()));
+        let target = if up {
+            row.checked_sub(1)
         } else {
-            let Some(end) = self.draft[self.cursor..]
-                .find('\n')
-                .map(|p| self.cursor + p)
-            else {
-                return;
-            };
-            let target = end + 1;
-            (
-                target,
-                self.draft[target..]
-                    .find('\n')
-                    .map_or(self.draft.len(), |p| target + p),
-            )
+            Some(row + 1)
         };
-        self.cursor = self.draft[target..end]
-            .char_indices()
-            .nth(column)
-            .map_or(end, |(p, _)| target + p);
+        if let Some(target) = target.filter(|target| *target < wrap(&self.draft, self.width).len())
+        {
+            self.cursor = draft_position(&self.draft, self.width, target, column);
+        }
     }
 }
 
 impl ClientShellState {
-    pub(super) fn local_chat_visible(&self) -> bool {
+    pub(crate) fn local_chat_visible(&self) -> bool {
         self.overlay.is_none()
+            && self.mode == ClientShellMode::Terminal
             && self.local_chat_matches()
             && self.local_chat.as_ref().is_some_and(|c| c.active)
     }
@@ -275,6 +363,9 @@ impl ClientShellState {
             last_revision: None,
             next_refresh: Instant::now(),
             area: Rect::default(),
+            reader_area: Rect::default(),
+            editor_area: Rect::default(),
+            draft_top: 0,
         });
         self.tick_local_chat(Instant::now(), outcome);
         outcome.repaint = true;
@@ -466,10 +557,16 @@ impl ClientShellState {
             }
         }
         if !self.local_chat_matches()
+            || self.mode != ClientShellMode::Terminal
             || self.overlay.is_some()
             || !self.local_chat.as_ref().is_some_and(|c| c.active)
         {
             return false;
+        }
+        if let RawInputEvent::Key(key) = event {
+            if crate::config::terminal_key_matches_combo(key, self.config.keybinds.prefix) {
+                return false;
+            }
         }
         let current_boot = self.snapshot.as_deref().map(|s| s.boot_id.clone());
         let chat = self.local_chat.as_mut().expect("checked local chat");
@@ -551,8 +648,27 @@ impl ClientShellState {
                 if super::contains(chat.area, (mouse.column, mouse.row)) =>
             {
                 match mouse.kind {
-                    MouseEventKind::ScrollUp => chat.scroll(3),
-                    MouseEventKind::ScrollDown => chat.scroll(-3),
+                    MouseEventKind::ScrollUp
+                        if super::contains(chat.reader_area, (mouse.column, mouse.row)) =>
+                    {
+                        chat.scroll(3)
+                    }
+                    MouseEventKind::ScrollDown
+                        if super::contains(chat.reader_area, (mouse.column, mouse.row)) =>
+                    {
+                        chat.scroll(-3)
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if super::contains(chat.editor_area, (mouse.column, mouse.row)) =>
+                    {
+                        let row = chat.draft_top + usize::from(mouse.row - chat.editor_area.y);
+                        let column = usize::from(mouse.column - chat.editor_area.x);
+                        chat.cursor = draft_position(&chat.draft, chat.width, row, column);
+                        chat.draft_dirty = true;
+                    }
+                    MouseEventKind::Down(MouseButton::Left) if mouse.row == chat.area.y => {
+                        chat.resume_live()
+                    }
                     _ => {}
                 }
             }
@@ -561,145 +677,37 @@ impl ClientShellState {
         outcome.repaint = true;
         true
     }
+}
 
-    pub(super) fn compose_local_chat(&mut self, frame: &mut FrameData, area: Rect) {
-        if !self.local_chat_matches() || self.overlay.is_some() {
-            return;
-        }
-        let Some(chat) = self.local_chat.as_mut().filter(|c| c.active) else {
-            return;
-        };
-        let Some(mut buffer) = frame.to_ratatui_buffer() else {
-            return;
-        };
-        chat.area = area;
-        if area.width < 12 || area.height < 8 {
-            for y in area.y..area.bottom() {
-                for x in area.x..area.right() {
-                    buffer[(x, y)].reset();
-                }
+// Resolve a click using the same cell widths and wrap rules as the editor.
+fn draft_position(text: &str, width: u16, target_row: usize, target_column: usize) -> usize {
+    let mut row = 0;
+    let mut column = 0;
+    for (index, ch) in text.char_indices() {
+        if ch == '\n' {
+            if row == target_row {
+                return index;
             }
-            render::put_text(
-                &mut buffer,
-                area.x,
-                area.y,
-                area.width,
-                "Local chat: enlarge window or Esc",
-                Style::default(),
-            );
-            frame.replace_from_ratatui_buffer_preserving_effects(&buffer, None);
-            return;
+            row += 1;
+            column = 0;
+            continue;
         }
-        let palette = &self.config.palette;
-        for y in area.y..area.bottom() {
-            for x in area.x..area.right() {
-                buffer[(x, y)].reset();
-            }
-        }
-        buffer.set_style(area, Style::default().fg(palette.text).bg(palette.panel_bg));
-        let width = area.width.saturating_sub(2);
-        if width != chat.width {
-            chat.draft_dirty = true;
-            chat.width = width;
-            chat.wrapped = wrap(&chat.text, width);
-        }
-        if chat.draft_dirty || chat.width != width || chat.draft_layout.is_empty() {
-            chat.draft_layout = wrap(&chat.draft, width);
-            chat.draft_prefix = wrap(&chat.draft[..chat.cursor], width);
-            chat.draft_dirty = false;
-        }
-        let draft = &chat.draft_layout;
-        let prefix = &chat.draft_prefix;
-        let cursor_line = prefix.len().saturating_sub(1);
-        let draft_rows = draft
-            .len()
-            .clamp(2, 5)
-            .min(usize::from(area.height.saturating_sub(6)));
-        chat.viewport_rows = usize::from(area.height).saturating_sub(draft_rows + 4);
-        let max_offset = chat.wrapped.len().saturating_sub(chat.viewport_rows);
-        chat.offset = chat.offset.min(max_offset);
-        let top = max_offset.saturating_sub(chat.offset);
-        let title = format!(
-            "Local chat · {} · {}{}{}",
-            chat.pane_id,
-            if chat.offset == 0 {
-                "live"
-            } else {
-                "reading cache"
-            },
-            if chat.pending_history.is_some() {
-                " · new output (Ctrl+End)"
-            } else {
-                ""
-            },
-            if chat.truncated {
-                " · older history unavailable"
-            } else {
-                ""
-            }
-        );
-        render::put_text(
-            &mut buffer,
-            area.x + 1,
-            area.y,
-            width,
-            &title,
-            Style::default().fg(palette.accent),
-        );
-        for (row, line) in chat
-            .wrapped
-            .iter()
-            .skip(top)
-            .take(chat.viewport_rows)
-            .enumerate()
-        {
-            render::put_text(
-                &mut buffer,
-                area.x + 1,
-                area.y + 1 + row as u16,
-                width,
-                line,
-                Style::default().fg(palette.text),
-            );
-        }
-        let input_y = area.y + 1 + chat.viewport_rows as u16;
-        render::put_text(
-            &mut buffer,
-            area.x + 1,
-            input_y,
-            width,
-            &chat.status,
-            Style::default().fg(palette.overlay0),
-        );
-        let draft_top = cursor_line.saturating_sub(draft_rows.saturating_sub(1));
-        for (row, line) in draft.iter().skip(draft_top).take(draft_rows).enumerate() {
-            render::put_text(
-                &mut buffer,
-                area.x + 1,
-                input_y + 1 + row as u16,
-                width,
-                line,
-                Style::default().fg(palette.text),
-            );
-        }
-        render::put_text(
-            &mut buffer,
-            area.x + 1,
-            area.bottom() - 1,
-            width,
-            "Enter send · Ctrl+J newline · PgUp/PgDn read · Ctrl+Y copy · Esc terminal",
-            Style::default().fg(palette.overlay0),
-        );
-        let x = prefix
-            .last()
-            .map_or(0, |l| UnicodeWidthStr::width(l.as_str()))
-            .min(usize::from(width.saturating_sub(1)));
-        let cursor = crate::protocol::CursorState {
-            x: area.x + 1 + x as u16,
-            y: input_y + 1 + cursor_line.saturating_sub(draft_top) as u16,
-            visible: true,
-            shape: 6,
+        let cells = if ch == '\t' {
+            1
+        } else {
+            ch.width().unwrap_or(0)
         };
-        frame.replace_from_ratatui_buffer_preserving_effects(&buffer, Some(cursor));
+        if column + cells > usize::from(width) && column > 0 {
+            row += 1;
+            column = 0;
+        }
+        if row == target_row && column + cells > target_column {
+            return index;
+        }
+        if row > target_row {
+            return index;
+        }
+        column += cells;
     }
+    text.len()
 }

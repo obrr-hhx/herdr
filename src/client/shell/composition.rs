@@ -69,6 +69,20 @@ impl ClientShellState {
             },
             &mut self.hits,
         );
+        if self.local_chat_visible() {
+            if let Some(snapshot) = self.snapshot.as_deref() {
+                render::render_tab_bar(
+                    &mut buffer,
+                    layout.tab_bar,
+                    snapshot,
+                    &self.config,
+                    &mut self.tab_scroll,
+                    &mut self.reveal_focused_tab,
+                    None,
+                    &mut self.hits,
+                );
+            }
+        }
         if !self.config.mouse_capture {
             self.hits = ShellHitMap::default();
         }
@@ -114,7 +128,7 @@ impl ClientShellState {
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
-        if self.local_chat_visible() {
+        if self.local_chat_visible() && (self.snapshot.is_none() || self.pane_surface.is_none()) {
             let layout = self.layout(cols, rows);
             let mut frame = self.compose_unavailable(cols, rows);
             self.compose_graphics(&mut frame, layout);
@@ -132,11 +146,11 @@ impl ClientShellState {
         let snapshot = self.snapshot.as_deref()?;
         // A one-step successor is retained separately until its exact snapshot arrives; do not
         // keep composing the now-superseded current pair while it is pending.
-        if self.pending_pane_surface.is_some() {
+        if self.pending_pane_surface.is_some() && !self.local_chat_visible() {
             return None;
         }
         let surface = self.pane_surface.as_ref()?;
-        if snapshot.revision != surface.projection_revision {
+        if snapshot.revision != surface.projection_revision && !self.local_chat_visible() {
             return None;
         }
         let layout = self.layout(cols, rows);
@@ -640,6 +654,15 @@ impl ClientShellState {
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;
+        }
+        if self.local_chat_visible()
+            && (snapshot.revision != surface.projection_revision
+                || self.pending_pane_surface.is_some())
+        {
+            // Retain neighbouring terminal pixels while the local editor is usable, but
+            // never dispatch pane-coordinate actions against an incoherent projection.
+            self.hits.panes.clear();
+            self.hits.pane_splits.clear();
         }
         self.compose_graphics(&mut frame, layout);
         self.compose_local_chat(&mut frame, layout.pane_surface);

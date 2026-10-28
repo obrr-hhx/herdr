@@ -1084,6 +1084,17 @@ async fn run_client_loop(
                     shell.set_graphics_cell_size(cell_width_px, cell_height_px);
                     shell.invalidate_pane_surface();
                 }
+                // Local drafts and cached reading must resize even when the remote
+                // terminal has no output changes (and therefore sends no new frame).
+                let local_frame = state.shell.as_mut().and_then(|shell| {
+                    shell
+                        .local_chat_visible()
+                        .then(|| shell.compose(new_cols, new_rows))
+                        .flatten()
+                });
+                if let Some(frame) = local_frame {
+                    state.present_frame(frame);
+                }
                 let msg = if let Some(shell) = &state.shell {
                     client_shell_resize_message(
                         shell,

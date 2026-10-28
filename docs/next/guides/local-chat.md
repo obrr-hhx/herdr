@@ -34,3 +34,22 @@ and pane. An unconfirmed send restores the submitted text alongside any newer
 draft and is never retried automatically. Inspect the original terminal first;
 Ctrl+R explicitly permits a manual retry or reconnects a draft after a server
 restart. Acknowledgement confirms terminal submission, not Claude's completion.
+
+The view covers only the focused Claude pane, retaining tabs and neighbouring splits.
+The bordered composer grows with the draft, and clicking its text moves the cursor.
+Hints adapt to narrow panes; very small panes show an enlarge prompt. Host resize
+redraws the local editor immediately without waiting for a remote frame and keeps
+the current reading anchor. Wheel events scroll only the history area, and never
+reach the remote terminal from inside the composer. Herdr prefix controls remain available.
+
+Successive alternate-screen reads retain older text only when three complete lines
+prove an overlap. If that evidence is missing, the reader shows **History limited**;
+it does not invent missing output. Fast output between refreshes may still be lost.
+
+The opt-in `scripts/local_chat_ssh_e2e.py` harness drives the real TUI through a PTY
+and SSH against an already-running, disposable `local-chat-e2e-*` session and Claude
+agent. It checks editing, eight host sizes, real prompt submission, reading during
+new output, mouse scrolling, split focus and zoom. It isolates client config/state,
+cleans up test splits, and saves terminal-cell PNG/text captures and JSON results.
+Run its `--help` for required targets and Python dependencies. This is separate
+from deterministic unit tests and requires an authenticated test Claude account.
