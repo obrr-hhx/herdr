@@ -13,6 +13,12 @@ use super::responses::{encode_error, encode_error_body, encode_success};
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 
 fn agent_prompt_submit_delay(agent: crate::detect::Agent, prompt_bytes: usize) -> Duration {
+    #[cfg(unix)]
+    if agent == crate::detect::Agent::Claude {
+        // Keep paste and Enter separate so Claude can finish handling bracketed paste,
+        // without charging every conversational turn the generic agent settle delay.
+        return Duration::from_millis(50);
+    }
     #[cfg(windows)]
     if agent == crate::detect::Agent::Codex {
         // Codex consumes Windows paste bursts at about 4 bytes/ms, then suppresses Enter briefly.
@@ -422,6 +428,21 @@ mod tests {
         start_deferred_agent_prompt(app, id, params)
             .recv_timeout(Duration::from_secs(1))
             .expect("agent prompt responds after submission")
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_prompt_keeps_a_short_paste_settle_without_the_generic_delay() {
+        for prompt_bytes in [1, 4_096, 65_536] {
+            assert_eq!(
+                agent_prompt_submit_delay(Agent::Claude, prompt_bytes),
+                Duration::from_millis(50)
+            );
+        }
+        assert_eq!(
+            agent_prompt_submit_delay(Agent::OpenCode, 4_096),
+            AGENT_PROMPT_SUBMIT_DELAY
+        );
     }
 
     #[test]

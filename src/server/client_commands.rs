@@ -13,6 +13,7 @@ pub(crate) const MAX_ENDPOINT_REQUEST_ID_BYTES: usize = 128;
 const ENDPOINT_RESPONSE_CHUNK_BYTES: usize = 512 * 1024;
 
 const CLIENT_SHELL_METHODS: &[&str] = &[
+    "agent.prompt",
     "client_shell.surface.set",
     "command.invoke",
     "integration.install",
@@ -26,6 +27,7 @@ const CLIENT_SHELL_METHODS: &[&str] = &[
     "pane.focus_direction",
     "pane.input.set",
     "pane.link.activate",
+    "pane.read",
     "pane.rename",
     "pane.resize",
     "pane.scroll",
@@ -59,6 +61,14 @@ pub(crate) fn supported_client_shell_method_names() -> &'static [&'static str] {
 
 pub(crate) fn supports_client_shell_method_name(method: &str) -> bool {
     CLIENT_SHELL_METHODS.contains(&method)
+}
+
+/// Client readers must not drive an alternate-screen application's scroll position.
+/// The JSON API's ordinary pane.read remains interactive; this newly advertised lane is passive.
+pub(crate) fn prepare_client_shell_method(method: &mut Method) {
+    if let Method::PaneRead(params) = method {
+        params.intent = crate::api::schema::ReadIntent::Passive;
+    }
 }
 
 pub(crate) fn supports_client_shell_method(method: &Method) -> bool {
@@ -285,6 +295,19 @@ mod tests {
             "/tests/fixtures/endpoint-method-shapes-v1.json"
         )))
         .expect("endpoint method shape fixture");
+        // Preserve every published generation-1 shape; freeze additive local-chat methods separately.
+        let mut expected = expected;
+        let additions: BTreeMap<String, String> = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/endpoint-method-shapes-local-chat-v1.json"
+        )))
+        .expect("local-chat method shape fixture");
+        for (name, shape) in additions {
+            assert!(
+                expected.insert(name, shape).is_none(),
+                "new methods must not replace a published shape"
+            );
+        }
         let actual = endpoint_method_shape_digests();
 
         assert_eq!(
@@ -360,6 +383,20 @@ mod tests {
         assert!(!supports_client_shell_method(&Method::ServerStop(
             crate::api::schema::EmptyParams::default(),
         )));
+    }
+
+    #[test]
+    fn client_shell_history_reads_are_passive_after_json_decoding() {
+        let mut request: crate::api::schema::Request = serde_json::from_value(serde_json::json!({
+            "id": "read", "method": "pane.read", "params": {
+                "pane_id": "w1:p1", "source": "recent_unwrapped", "lines": 2000
+            }
+        }))
+        .unwrap();
+        prepare_client_shell_method(&mut request.method);
+        assert!(
+            matches!(request.method, Method::PaneRead(params) if params.intent == crate::api::schema::ReadIntent::Passive)
+        );
     }
 
     #[test]

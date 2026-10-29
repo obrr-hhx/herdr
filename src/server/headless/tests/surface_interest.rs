@@ -721,3 +721,104 @@ async fn two_headless_servers_drive_atomic_endpoint_handoff() {
     shutdown_test_runtimes(&mut source_server);
     shutdown_test_runtimes(&mut target_server);
 }
+
+#[tokio::test]
+async fn local_chat_endpoint_reads_passively_and_preserves_prompt_approval_guard() {
+    let mut server = test_headless_server();
+    let mut input_rx = install_focused_test_runtime(&mut server, b"\x1b[?1049hREAD_CACHE_ROW");
+    let (writer, control_rx, _) = test_client_writer();
+    let client_id = 711;
+    server.handle_server_event(ServerEvent::ClientShellConnected {
+        client_id,
+        surface_cols: 80,
+        surface_rows: 24,
+        cell_width_px: 8,
+        cell_height_px: 16,
+        pixel_mouse: false,
+        direct_graphics: false,
+        endpoint_keybindings: true,
+        mouse_capture: true,
+        surface_active: true,
+        writer,
+    });
+    let snapshot = client_shell_snapshot(read_server_message(control_rx.recv().unwrap()));
+    let pane_id = snapshot.focused_pane_id.clone().unwrap();
+    let boot_id = server.client_shell_boot_id.clone();
+    let req = api::schema::Request {
+        id: "local-history".into(),
+        method: api::schema::Method::PaneRead(api::schema::PaneReadParams {
+            pane_id: pane_id.clone(),
+            source: api::schema::ReadSource::RecentUnwrapped,
+            lines: Some(2000),
+            format: api::schema::ReadFormat::Text,
+            strip_ansi: true,
+            intent: api::schema::ReadIntent::Interactive,
+        }),
+    };
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id: boot_id.clone(),
+        request: Box::new(req),
+    });
+    assert!(
+        server.pending_alt_screen_reads.is_empty(),
+        "cached reader must not scroll the alternate-screen app"
+    );
+    let response = local_chat_response(&mut server, &control_rx, "local-history").await;
+    let response: api::schema::SuccessResponse = serde_json::from_slice(&response).unwrap();
+    assert!(
+        matches!(response.result,api::schema::ResponseResult::PaneRead{read} if read.text.contains("READ_CACHE_ROW"))
+    );
+    server.app.state.ensure_test_terminals();
+    let terminal = server.app.state.terminals.values_mut().next().unwrap();
+    terminal.set_detected_state(
+        Some(crate::detect::Agent::Claude),
+        crate::detect::AgentState::Blocked,
+    );
+    server.handle_server_event(ServerEvent::ClientShellEndpointRequest {
+        client_id,
+        boot_id,
+        request: Box::new(api::schema::Request {
+            id: "local-prompt".into(),
+            method: api::schema::Method::AgentPrompt(api::schema::AgentPromptParams {
+                target: pane_id,
+                text: "must not answer permission".into(),
+                wait: None,
+            }),
+        }),
+    });
+    let response = local_chat_response(&mut server, &control_rx, "local-prompt").await;
+    let response: api::schema::ErrorResponse = serde_json::from_slice(&response).unwrap();
+    assert_eq!(response.error.code, "agent_blocked");
+    assert!(
+        input_rx.try_recv().is_err(),
+        "blocked prompt must not reach terminal input"
+    );
+    shutdown_test_runtimes(&mut server);
+}
+
+async fn local_chat_response(
+    server: &mut HeadlessServer,
+    control_rx: &std::sync::mpsc::Receiver<Vec<u8>>,
+    expected: &str,
+) -> Vec<u8> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let event = server.server_event_rx.recv().await.unwrap();
+            let ready = matches!(&event, ServerEvent::ClientShellEndpointResponseChunkReady { request_id, .. } if request_id == expected);
+            server.handle_server_event(event);
+            if ready { break; }
+        }
+    }).await.expect("endpoint response deadline");
+    loop {
+        let message = read_server_message(control_rx.recv_timeout(Duration::from_secs(1)).unwrap());
+        if let ServerMessage::ClientShellEndpointResponseChunk {
+            data, request_id, ..
+        } = message
+        {
+            if request_id == expected {
+                return data;
+            }
+        }
+    }
+}

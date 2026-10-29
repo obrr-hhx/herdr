@@ -82,6 +82,7 @@ impl ClientShellState {
     }
 
     pub(crate) fn select_unavailable_local(&mut self) {
+        self.clear_activation_preview();
         self.reset_endpoint_projection();
         self.active_endpoint_id = ClientEndpointId::Local;
         self.mode = ClientShellMode::Terminal;
@@ -91,6 +92,15 @@ impl ClientShellState {
     }
 
     pub(crate) fn retire_endpoint(&mut self, endpoint_id: &ClientEndpointId) {
+        self.cached_screens
+            .retain(|screen| &screen.endpoint != endpoint_id);
+        if self
+            .activation_preview
+            .as_ref()
+            .is_some_and(|preview| &preview.endpoint == endpoint_id)
+        {
+            self.clear_activation_preview();
+        }
         self.retire_endpoint_notifications(endpoint_id);
         if let Some(endpoint) = self
             .endpoints

@@ -164,6 +164,10 @@ impl ClientShellState {
             outcome.repaint = true;
         }
         for event in events {
+            if self.handle_local_chat_event(&event, &mut outcome) {
+                self.reconcile_input_source();
+                continue;
+            }
             if let Some(update) = host_theme_update(&event) {
                 push_host_theme_update(&mut outcome.requests, update);
             }

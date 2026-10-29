@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Changed
+- Local Claude conversation caching uses native-style prompt markers, assistant bullets, tool trees, hanging indentation, highlighted user messages, and a horizontal-rule composer while retaining local input and paged history.
+
+### Fixed
+- F6 history remains scrollable when native rows have no exact match in saved history, including short replies and different wrapping widths. Initial wheel movement preserves native geometry, and scrolling before the first saved-history reply is applied when it arrives.
+- Sending and scrolling in F6 retain one native terminal scene instead of switching between native and separately formatted history. Locally echoed messages no longer replace the conversation, and reading freezes received native rows while output continues. Earlier saved rows join at matching text; retained native cells are bounded.
+- F6 displays the latest received native terminal body while Claude generates output, without waiting for complete transcript records. The remote composer and status footer are excluded; local input remains independent and scrolling uses the same cached native rows. Native response colors are preserved.
+- Rebinding a cached draft after PTY handoff no longer mistakes a new runtime ID for a different Claude conversation or fences its new submission acknowledgement. A changed Claude conversation still requires manual retry.
+- A draft blocked after reconnect or server replacement now shows an accented Ctrl+R editor title and a recovery-first hint, including in narrow panes. Unlocking keeps the draft and never submits it automatically.
+- Local chat clears its temporary sent message when Claude saves multiline paste records with tagged closing markers, avoiding duplicate messages and a stuck history-sync label.
+- Claude prompt submissions on macOS and Linux retain a short paste settle interval instead of waiting 300 ms before Enter, reducing remote submission confirmation latency.
+
 ## [0.9.0] - 2026-09-07
 
 ### Added

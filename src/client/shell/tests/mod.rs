@@ -220,3 +220,6 @@ mod mobile;
 mod mouse_selection;
 mod popup_focus_projection;
 mod startup_overlays;
+
+mod agent_history;
+mod local_chat;

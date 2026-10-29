@@ -7,6 +7,12 @@ Herdr keeps panes running in a background server. Your terminal client can detac
 
 For the local, SSH, and `herdr --remote` workflows, see [How to work with Herdr](/docs/how-to-work/).
 
+During a machine switch, the client immediately displays a read-only cached view of a previously visited pane, labeled as syncing. Terminal input remains paused until the remote activation and terminal-mode synchronization complete. An unvisited pane displays a waiting view instead of another pane's cached content. These previews stay in memory, bounded to eight screens and 200,000 terminal cells.
+
+
+Remote presentation phases and background surface release have a bounded 15-second budget; local phases keep their 5-second budget. This avoids discarding an otherwise healthy SSH connection when a large compressed frame takes longer than five seconds. The preview remains read-only until synchronization completes.
+
+
 ## Detach and reattach
 
 Detach the client with `ctrl+b q`; panes and agents keep running. Reattach by running `herdr` again. Stop the session and its panes with `herdr server stop`.
@@ -69,7 +75,7 @@ herdr --remote workbox
 
 Remote attach and saved SSH machines support Linux, macOS, and Windows local clients connecting to Linux or macOS hosts on x86_64 and aarch64, or Windows hosts on x86_64. Local and remote versions do not need to match once both support the stable endpoint generation. On Linux and macOS hosts, Herdr prefers a compatible `herdr` already on the remote `PATH`, then checks common direct, Homebrew, mise, and Nix profile install paths. If no compatible binary exists, interactive runs prompt to install one to `~/.local/bin/herdr`; non-interactive runs fail instead of modifying the host. If `~/.local/bin` is not on the remote `PATH`, Herdr warns after install. Windows hosts must already have a compatible Herdr package with remote host support on `PATH`; remote attach does not install or update it.
 
-By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings. Existing user keepalive settings win. Linux and macOS clients also use a private per-attach control socket for connection reuse; Windows OpenSSH does not. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
+By default, `herdr --remote` runs remote setup and the bridge through a temporary SSH config that includes your SSH config first, then adds fallback keepalive settings and `Compression yes`. Compression reduces repeated terminal-cell data so large screen frames are less likely to delay control replies on slow links. Existing user settings win, including an explicit `Compression no`. Linux and macOS clients also use a private per-attach control socket for connection reuse; Windows OpenSSH does not. Set `[remote].manage_ssh_config = false` to use plain `ssh` without Herdr's generated config or control socket.
 
 Remote attach uses your normal OpenSSH authentication. If the target uses a passphrase-protected key in a non-interactive shell, script, CI job, or mobile terminal that cannot show the passphrase prompt, load the key into ssh-agent first:
 

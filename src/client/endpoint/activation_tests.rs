@@ -1316,7 +1316,7 @@ fn silent_remote_release_expires_independently_of_local_activation() {
         .unwrap()
         .iter()
         .any(|m| surface_set_active(m) == Some(true)));
-    endpoints.tick_health(Instant::now() + ACTIVATION_TIMEOUT);
+    endpoints.tick_health(Instant::now() + REMOTE_ACTIVATION_TIMEOUT);
     let failures = endpoints.take_failures();
     assert_eq!(failures.len(), 1);
     assert_eq!(failures[0].endpoint_id, remote);
@@ -1484,4 +1484,43 @@ fn clicking_partially_projected_target_cannot_take_already_active_shortcut() {
         next.phase,
         ActivationPhase::ActivatingTarget { .. }
     ));
+}
+
+#[test]
+fn remote_presentation_survives_the_local_deadline_but_has_a_finite_budget() {
+    let (shell, mut endpoints, _, _) = shell_and_registry();
+    let now = Instant::now();
+    let activation = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        endpoint(),
+        None,
+        resize(),
+        1001,
+        now,
+    )
+    .unwrap();
+    assert!(
+        !activation.expired(now + Duration::from_secs(6)),
+        "large remote frames must not force a reconnect at the local five-second deadline"
+    );
+    assert!(
+        activation.expired(now + Duration::from_secs(16)),
+        "a missing remote presentation must still time out"
+    );
+    let (shell, mut endpoints, _, _) = shell_and_registry();
+    let local = PendingEndpointActivation::begin(
+        &shell,
+        &mut endpoints,
+        ClientEndpointId::Local,
+        None,
+        resize(),
+        1002,
+        now,
+    )
+    .unwrap();
+    assert!(
+        local.expired(now + Duration::from_secs(6)),
+        "local presentations keep their existing five-second deadline"
+    );
 }

@@ -69,6 +69,20 @@ impl ClientShellState {
             },
             &mut self.hits,
         );
+        if self.local_chat_visible() {
+            if let Some(snapshot) = self.snapshot.as_deref() {
+                render::render_tab_bar(
+                    &mut buffer,
+                    layout.tab_bar,
+                    snapshot,
+                    &self.config,
+                    &mut self.tab_scroll,
+                    &mut self.reveal_focused_tab,
+                    None,
+                    &mut self.hits,
+                );
+            }
+        }
         if !self.config.mouse_capture {
             self.hits = ShellHitMap::default();
         }
@@ -109,11 +123,21 @@ impl ClientShellState {
     }
 
     pub(crate) fn compose(&mut self, cols: u16, rows: u16) -> Option<FrameData> {
+        if self.activation_preview.is_some() {
+            return self.compose_activation_preview(cols, rows);
+        }
         if self.last_composed_size != Some((cols, rows)) && self.mode == ClientShellMode::Navigate {
             self.reveal_navigation_workspace = true;
             self.reveal_mobile_workspace = true;
         }
         self.last_composed_size = Some((cols, rows));
+        if self.local_chat_visible() && (self.snapshot.is_none() || self.pane_surface.is_none()) {
+            let layout = self.layout(cols, rows);
+            let mut frame = self.compose_unavailable(cols, rows);
+            self.compose_graphics(&mut frame, layout);
+            self.compose_local_chat(&mut frame, layout.pane_surface);
+            return Some(frame);
+        }
         let valid_navigation_target = self.mode == ClientShellMode::Navigate
             && self
                 .navigate_workspace_id
@@ -125,11 +149,11 @@ impl ClientShellState {
         let snapshot = self.snapshot.as_deref()?;
         // A one-step successor is retained separately until its exact snapshot arrives; do not
         // keep composing the now-superseded current pair while it is pending.
-        if self.pending_pane_surface.is_some() {
+        if self.pending_pane_surface.is_some() && !self.local_chat_visible() {
             return None;
         }
         let surface = self.pane_surface.as_ref()?;
-        if snapshot.revision != surface.projection_revision {
+        if snapshot.revision != surface.projection_revision && !self.local_chat_visible() {
             return None;
         }
         let layout = self.layout(cols, rows);
@@ -289,6 +313,25 @@ impl ClientShellState {
             frame.cells[start..start + usize::from(bar.width)].to_vec()
         });
         blit_pane_surface(&mut frame, &surface.frame, layout.pane_surface);
+        // The reader replaces terminal pixels, but notices and shell overlays must
+        // remain above it. Drawing it last erased their text while leaving borders.
+        if self.local_chat_visible() {
+            let area = self.local_chat_area(layout.pane_surface);
+            let status = snapshot
+                .agents
+                .iter()
+                .find(|agent| Some(&agent.pane_id) == snapshot.focused_pane_id.as_ref())
+                .map(|agent| agent.agent_status);
+            if let Some(chat) = self.local_chat.as_mut() {
+                Self::compose_local_chat_frame(
+                    chat,
+                    &self.config.palette,
+                    status,
+                    &mut frame,
+                    area,
+                );
+            }
+        }
         restore_mode_bar(&mut frame, mode_bar, mode_bar_cells.as_deref());
         let has_selection = self
             .selection
@@ -633,6 +676,15 @@ impl ClientShellState {
             self.hits.panes.clear();
             self.hits.pane_splits.clear();
             self.hits.popup = None;
+        }
+        if self.local_chat_visible()
+            && (snapshot.revision != surface.projection_revision
+                || self.pending_pane_surface.is_some())
+        {
+            // Retain neighbouring terminal pixels while the local editor is usable, but
+            // never dispatch pane-coordinate actions against an incoherent projection.
+            self.hits.panes.clear();
+            self.hits.pane_splits.clear();
         }
         self.compose_graphics(&mut frame, layout);
         Some(frame)

@@ -1482,3 +1482,137 @@ fn navigator_foreign_tab_selection_keeps_the_tab_target() {
         }] if activated == &endpoint_id && tab_id == "tab_1"
     ));
 }
+
+#[test]
+fn cached_activation_preview_is_immediate_and_never_changes_input_identity() {
+    let (mut state, remote) = state_with_remote();
+    assert!(state.activate_endpoint_projection(&remote));
+    let mut remote_surface = surface();
+    remote_surface.boot_id = "remote-boot".into();
+    remote_surface.frame = FrameData::from_ratatui_buffer_with_hyperlinks(
+        &Buffer::with_lines(["", "CACHED_REMOTE_MESSAGE"]),
+        None,
+        &[],
+    );
+    state.set_pane_surface(remote_surface);
+    state.remember_endpoint_screen(106, 24);
+    assert!(state.activate_endpoint_projection(&ClientEndpointId::Local));
+    state.set_pane_surface(surface());
+    let before = state.active_endpoint_id.clone();
+    state.start_activation_preview(&remote, None);
+    for (cols, rows) in [(106, 24), (160, 48), (40, 12), (1, 1)] {
+        let frame = state.compose(cols, rows).unwrap();
+        assert_eq!(frame.cells.len(), usize::from(cols) * usize::from(rows));
+        assert!(frame.cursor.is_none() && frame.graphics.is_empty());
+        assert_eq!(state.active_endpoint_id, before);
+        assert!(state.hits.panes.is_empty() && state.hits.tabs.is_empty());
+        if cols == 106 {
+            let text = super::local_chat::frame_text(&frame);
+            assert!(
+                text.contains("CACHED_REMOTE_MESSAGE") && text.contains("Cached view"),
+                "{text}"
+            );
+        }
+    }
+    state
+        .endpoints
+        .iter_mut()
+        .find(|e| e.endpoint_id == remote)
+        .unwrap()
+        .snapshot
+        .as_mut()
+        .unwrap()
+        .boot_id = "replacement-server".into();
+    state.start_activation_preview(&remote, None);
+    let text = super::local_chat::frame_text(&state.compose(106, 24).unwrap());
+    assert!(text.contains("waiting for first image") && !text.contains("CACHED_REMOTE_MESSAGE"));
+}
+
+#[test]
+fn activation_preview_labels_cache_misses_and_clears_retired_targets() {
+    let (mut state, remote) = state_with_remote();
+    state.start_activation_preview(
+        &remote,
+        Some(&ClientEndpointFocusTarget::Pane("unvisited".into())),
+    );
+    let text = super::local_chat::frame_text(&state.compose(106, 24).unwrap());
+    assert!(text.contains("waiting for first image"));
+    state.retire_endpoint(&remote);
+    assert!(!state.has_activation_preview());
+}
+
+#[test]
+#[ignore = "non-gating cached preview rendering profile"]
+fn activation_preview_render_profile() {
+    for count in [1, 15] {
+        let (mut state, remote) = state_with_remote();
+        let snapshot = state
+            .endpoints
+            .iter_mut()
+            .find(|e| e.endpoint_id == remote)
+            .unwrap()
+            .snapshot
+            .as_mut()
+            .unwrap();
+        let pane = snapshot.panes[0].clone();
+        for index in 1..count {
+            let mut other = pane.clone();
+            other.pane_id = format!("extra-{index}");
+            other.focused = false;
+            snapshot.panes.push(other);
+        }
+        assert!(state.activate_endpoint_projection(&remote));
+        let mut cached = surface();
+        cached.boot_id = "remote-boot".into();
+        let area = state.layout(120, 40).pane_surface;
+        let mut buffer = Buffer::empty(Rect::new(0, 0, area.width, area.height));
+        for row in 0..area.height {
+            buffer.set_string(
+                0,
+                row,
+                "Populated cached terminal content",
+                Style::default(),
+            );
+        }
+        cached.frame = FrameData::from_ratatui_buffer_with_hyperlinks(&buffer, None, &[]);
+        state.set_pane_surface(cached);
+        state.remember_endpoint_screen(120, 40);
+        assert!(state.activate_endpoint_projection(&ClientEndpointId::Local));
+        state.set_pane_surface(surface());
+        state.start_activation_preview(&remote, None);
+        let mut times = Vec::new();
+        for _ in 0..100 {
+            let start = std::time::Instant::now();
+            std::hint::black_box(state.compose(120, 40).unwrap());
+            times.push(start.elapsed().as_micros());
+        }
+        times.sort_unstable();
+        eprintln!(
+            "activation_preview panes={count} p50_us={} p95_us={}",
+            times[50], times[95]
+        );
+    }
+}
+
+#[test]
+fn cached_preview_allows_retargeting_to_the_still_committed_source() {
+    let (mut state, remote) = state_with_remote();
+    state.start_activation_preview(&remote, None);
+    state.compose(106, 24).unwrap();
+    let hit = state
+        .hits
+        .machines
+        .iter()
+        .find(|hit| hit.endpoint_id.is_local())
+        .unwrap();
+    let point = (hit.rect.x + hit.rect.width.saturating_sub(2), hit.rect.y);
+    let mut outcome = ClientShellInput::default();
+    assert!(state.handle_endpoint_machine_click(point, &mut outcome));
+    assert!(outcome.actions.iter().any(|action| matches!(
+        action,
+        ClientShellAction::ActivateEndpoint {
+            endpoint_id: ClientEndpointId::Local,
+            ..
+        }
+    )));
+}

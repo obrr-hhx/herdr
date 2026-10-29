@@ -19,6 +19,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "list" => agent_list(&args[1..]),
         "get" => agent_get(&args[1..]),
         "read" => agent_read(&args[1..]),
+        "history" => agent_history(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
         "rename" => agent_rename(&args[1..]),
@@ -927,6 +928,7 @@ fn print_agent_help() {
     eprintln!("herdr agent commands:");
     eprintln!("  herdr agent list");
     eprintln!("  herdr agent get <target>");
+    eprintln!("  herdr agent history <pane-id> [--before N] [--ssh-target TARGET]");
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
@@ -950,4 +952,36 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+fn agent_history(args: &[String]) -> std::io::Result<i32> {
+    let Some(pane) = args.first().filter(|s| !s.starts_with('-')) else {
+        eprintln!(
+            "usage: herdr agent history <pane-id> [--before <byte-offset>] [--ssh-target <ssh-target>]"
+        );
+        return Ok(2);
+    };
+    let mut before = None;
+    let mut remote = None;
+    let mut index = 1;
+    while index < args.len() {
+        match (args[index].as_str(), args.get(index + 1)) {
+            ("--before", Some(value)) => {
+                before = Some(value.parse::<u64>().map_err(std::io::Error::other)?)
+            }
+            ("--ssh-target", Some(value)) => remote = Some(value.as_str()),
+            _ => return Ok(2),
+        }
+        index += 2;
+    }
+    let session = crate::session::active_name().unwrap_or_else(|| "default".into());
+    let page = match remote {
+        Some(target) => crate::remote::read_claude_history(target, &session, pane, before, "")?,
+        None => crate::agent_history::read_local(&session, pane, before, "")?,
+    };
+    println!(
+        "{}",
+        serde_json::to_string(&page).map_err(std::io::Error::other)?
+    );
+    Ok(0)
 }

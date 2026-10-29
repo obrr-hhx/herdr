@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 mod actions;
+mod activation_preview;
 mod agent_sidebar;
 mod aggregate_navigation;
 mod workspace_navigation;
@@ -20,6 +21,7 @@ mod global_menu;
 mod graphics;
 mod input;
 mod input_source;
+mod local_chat;
 mod mobile;
 mod mouse;
 mod notification_policy;

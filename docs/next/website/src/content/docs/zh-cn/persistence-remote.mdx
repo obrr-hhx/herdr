@@ -7,6 +7,12 @@ Herdr 让窗格在后台服务器中持续运行。你的终端客户端可以�
 
 关于本地、SSH 和 `herdr --remote` 工作流,参见[使用 Herdr 的工作方式](/zh-cn/docs/how-to-work/)。
 
+切换机器时，客户端立即显示曾访问窗格的只读缓存，并标明正在同步。远程激活及终端模式同步完成前，终端输入仍暂停。尚未访问的窗格显示等待画面，不借用其他窗格的缓存。预览只保存在内存中，最多八个画面、共 200,000 个终端单元格。
+
+
+远程画面同步各阶段和后台画面释放的等待上限为 15 秒；本地阶段仍为 5 秒。这样可避免大画面即使已压缩、传输仍超过五秒时过早丢弃健康的 SSH 连接。同步完成前，预览保持只读。
+
+
 ## 分离与重新连接
 
 用 `ctrl+b q` 分离客户端;窗格和智能体继续运行。再次运行 `herdr` 即可重新连接。用 `herdr server stop` 停止会话及其窗格。
@@ -69,7 +75,7 @@ herdr --remote workbox
 
 远程连接支持 Linux、macOS 和 Windows 本地客户端连接 x86_64 与 aarch64 的 Linux 和 macOS 主机。Herdr 会检查远程平台,优先使用远程 `PATH` 上兼容的 `herdr`，然后检查常见的直接安装、Homebrew、mise 和 Nix profile 路径。只要两端都支持稳定端点代数，客户端和服务器的发行版本就不必一致。如果没有兼容的二进制文件，交互式运行会询问是否安装到 `~/.local/bin/herdr`;非交互式运行则直接失败,不会修改主机。如果 `~/.local/bin` 不在远程 `PATH` 上,Herdr 会在安装后发出警告。Windows 不能作为远程主机。
 
-默认情况下,`herdr --remote` 通过一个临时 SSH 配置运行远程设置和桥接: 先包含你的 SSH 配置,再补充兜底的保活设置。已有的用户保活设置优先。Linux 和 macOS 客户端还会添加一个私有的单次连接 control socket 来复用连接;Windows OpenSSH 不使用此方式。设置 `[remote].manage_ssh_config = false` 可以不用 Herdr 生成的配置或 control socket,而使用普通 `ssh`。
+默认情况下,`herdr --remote` 通过一个临时 SSH 配置运行远程设置和桥接: 先包含你的 SSH 配置,再补充兜底的保活设置和 `Compression yes`。压缩减少重复的终端单元格数据，避免大画面在慢链路上长时间占用连接、拖延控制响应。已有的用户设置优先，包括显式配置的 `Compression no`。Linux 和 macOS 客户端还会添加一个私有的单次连接 control socket 来复用连接;Windows OpenSSH 不使用此方式。设置 `[remote].manage_ssh_config = false` 可以不用 Herdr 生成的配置或 control socket,而使用普通 `ssh`。
 
 远程连接使用正常的 OpenSSH 认证。如果在非交互式 shell、脚本、CI 或移动终端中无法输入私钥口令，请先将密钥加载到 ssh-agent：
 
