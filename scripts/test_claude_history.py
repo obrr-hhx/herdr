@@ -29,7 +29,8 @@ class HistoryTests(unittest.TestCase):
                     json.dumps(message(i, f"中文 history {i}"), ensure_ascii=False)
                     + "\n"
                     for i in range(150)
-                )
+                ),
+                encoding="utf-8",
             )
             records = {}
             before = None
