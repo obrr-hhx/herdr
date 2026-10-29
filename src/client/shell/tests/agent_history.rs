@@ -3,6 +3,16 @@ use super::*;
 use crate::agent_history::{HistoryPage, HistoryRecord};
 use crate::client::history_jobs::HistoryResult;
 
+fn wheel_up(state: &mut ClientShellState) {
+    let area = state.local_chat.as_ref().unwrap().reader_area;
+    state.handle_raw_events(vec![RawInputEvent::Mouse(MouseEvent {
+        kind: crossterm::event::MouseEventKind::ScrollUp,
+        column: area.x + 1,
+        row: area.y + 1,
+        modifiers: KeyModifiers::empty(),
+    })]);
+}
+
 fn record(index: u64, kind: &str, text: &str) -> HistoryRecord {
     HistoryRecord {
         id: format!("record-{index:05}"),
@@ -350,12 +360,9 @@ fn live_frames_stream_without_jsonl_and_hide_remote_composer_and_footer() {
         .unwrap()
         .text
         .contains("STREAM_FIRST"));
-    press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
+    wheel_up(&mut state);
     let reading = frame_text(&state.compose(106, 30).unwrap());
-    assert!(
-        reading.contains("STREAM_FIRST_MORE_TOKENS") && !reading.contains("saved 79"),
-        "{reading}"
-    );
+    assert!(reading.contains("STREAM_FIRST_MORE_TOKENS"), "{reading}");
     press(&mut state, KeyCode::End, KeyModifiers::CONTROL);
     assert!(frame_text(&state.compose(106, 30).unwrap()).contains("STREAM_FIRST_MORE_TOKENS"));
 }
@@ -887,11 +894,7 @@ fn live_surface_render_profile() {
 #[test]
 fn short_native_reading_stays_frozen_even_when_its_scroll_offset_is_zero() {
     let (mut state, _) = reader();
-    complete(
-        &mut state,
-        page(vec![record(0, "assistant", "SHORT_SAVED_HISTORY")], 0),
-        false,
-    );
+    complete(&mut state, page(vec![], 0), false);
     state.history_source_enabled = true;
     state.set_pane_surface(streaming_surface("⏺ UNSAVED_NATIVE_REPLY", 1));
     state.tick_local_chat(
@@ -939,9 +942,69 @@ fn sending_and_scrolling_keep_native_context_in_the_same_reader_rectangle() {
     assert!(!sending.contains("DIFFERENT_ARCHIVE_LAYOUT"));
     assert_eq!(state.local_chat.as_ref().unwrap().reader_area.x, rect.x);
     assert_eq!(state.local_chat.as_ref().unwrap().reader_area.y, rect.y);
-    press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
+    wheel_up(&mut state);
     let reading = frame_text(&state.compose(106, 30).unwrap());
     assert!(reading.contains("NATIVE_CONTEXT_MUST_REMAIN"), "{reading}");
-    assert!(!reading.contains("DIFFERENT_ARCHIVE_LAYOUT"));
     assert_eq!(state.local_chat.as_ref().unwrap().reader_area, rect);
+}
+
+#[test]
+fn native_reader_can_scroll_saved_history_without_an_exact_screen_line_match() {
+    let (mut state, _) = reader();
+    complete(
+        &mut state,
+        page(
+            (0..100)
+                .map(|i| record(i, "assistant", &format!("OLDER_SAVED_MESSAGE_{i:03}")))
+                .collect(),
+            0,
+        ),
+        false,
+    );
+    state.history_source_enabled = true;
+    state.set_pane_surface(streaming_surface("⏺ short latest answer", 1));
+    state.tick_local_chat(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut ClientShellInput::default(),
+    );
+    state.compose(106, 30).unwrap();
+    press(&mut state, KeyCode::PageUp, KeyModifiers::empty());
+    let frame = frame_text(&state.compose(106, 30).unwrap());
+    assert!(
+        state.local_chat.as_ref().unwrap().offset > 0,
+        "saved history was excluded from the native reader: {frame}"
+    );
+    assert!(frame.contains("OLDER_SAVED_MESSAGE_"), "{frame}");
+    press(&mut state, KeyCode::End, KeyModifiers::CONTROL);
+    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("short latest answer"));
+}
+
+#[test]
+fn wheel_scroll_before_first_history_reply_is_applied_without_losing_the_native_scene() {
+    let (mut state, _) = reader();
+    state.history_source_enabled = true;
+    state.set_pane_surface(streaming_surface("⏺ LIVE_WHILE_HISTORY_LOADS", 1));
+    state.tick_local_chat(
+        std::time::Instant::now() + std::time::Duration::from_secs(1),
+        &mut ClientShellInput::default(),
+    );
+    state.compose(106, 30).unwrap();
+    wheel_up(&mut state);
+    assert_eq!(state.local_chat.as_ref().unwrap().offset, 0);
+    complete(
+        &mut state,
+        page(
+            (0..100)
+                .map(|i| record(i, "assistant", &format!("LATE_HISTORY_{i:03}")))
+                .collect(),
+            0,
+        ),
+        false,
+    );
+    let frame = frame_text(&state.compose(106, 30).unwrap());
+    assert_eq!(state.local_chat.as_ref().unwrap().offset, 3);
+    assert!(frame.contains("LIVE_WHILE_HISTORY_LOADS"), "{frame}");
+    assert!(frame.contains("LATE_HISTORY_"), "{frame}");
+    press(&mut state, KeyCode::Home, KeyModifiers::CONTROL);
+    assert!(frame_text(&state.compose(106, 30).unwrap()).contains("LATE_HISTORY_000"));
 }

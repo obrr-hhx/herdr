@@ -325,12 +325,25 @@ impl LocalChat {
             self.transcript.has_older = self.transcript.before > 0;
         }
         let lines = document(&self.transcript.records);
-        if (self.offset > 0 || self.reading_history) && !older {
-            self.pending_document = Some(lines);
-        } else if older && self.reading_history && self.live_surface.body.is_some() {
+        if self.reading_history
+            && self.live_surface.body.is_some()
+            && (older || self.live_surface.awaiting_saved)
+        {
             self.install_document(lines);
             self.pending_document = None;
             self.live_surface.reanchor(&self.wrapped);
+            if !self.live_surface.awaiting_saved {
+                self.offset = self
+                    .offset
+                    .saturating_add(std::mem::take(&mut self.live_surface.pending_scroll))
+                    .min(
+                        self.live_surface
+                            .row_count()
+                            .saturating_sub(self.viewport_rows),
+                    );
+            }
+        } else if (self.offset > 0 || self.reading_history) && !older {
+            self.pending_document = Some(lines);
         } else if self.offset > 0 && older {
             let anchor = self
                 .wrapped

@@ -12,6 +12,8 @@ pub(super) struct LiveSurface {
     retained: Vec<Row>,
     frozen: Option<Vec<Row>>,
     pub(super) saved_prefix: usize,
+    pub(super) awaiting_saved: bool,
+    pub(super) pending_scroll: usize,
 }
 
 impl LiveSurface {
@@ -27,52 +29,65 @@ impl LiveSurface {
         rows
     }
 
-    pub(super) fn freeze(&mut self, saved: &[String]) {
+    pub(super) fn freeze(&mut self, saved: &[String], viewport_rows: usize) {
         if self.frozen.is_none() {
-            let rows = self.rows();
-            // Join persisted history only at a verified text overlap. Native rows
-            // remain untouched, so the first scroll cannot replace the visible scene.
-            let normal = |line: &str| line.trim().trim_start_matches(['⏺', '❯']).trim().to_owned();
-            let saved_keys: Vec<_> = saved.iter().map(|line| normal(line)).collect();
-            let keys: Vec<_> = rows
-                .iter()
-                .map(|row| normal(&row.iter().map(Cell::symbol).collect::<String>()))
-                .collect();
-            let anchor = keys
-                .iter()
-                .enumerate()
-                .take(32)
-                .find_map(|(native_index, key)| {
-                    if key.chars().count() < 12 {
-                        return None;
-                    }
-                    saved_keys
-                        .iter()
-                        .rposition(|value| value == key)
-                        .map(|saved_index| (native_index, saved_index))
-                });
-            if let Some((native_index, saved_index)) = anchor {
-                self.saved_prefix = saved_index;
-                self.frozen = Some(rows.into_iter().skip(native_index).collect());
-            } else {
-                self.frozen = Some(rows);
+            let mut rows = self.rows();
+            // Native output is top-aligned when it is shorter than the viewport.
+            // Preserve that blank space so the first wheel tick moves the existing
+            // scene by three rows instead of replacing it with a full history page.
+            if let Some(first) = rows.first() {
+                let mut blank = first.clone();
+                for cell in &mut blank {
+                    cell.set_symbol(" ");
+                    cell.skip = false;
+                }
+                rows.resize(rows.len().max(viewport_rows), blank);
             }
+            self.frozen = Some(rows);
+            self.reanchor(saved);
         }
     }
 
     pub(super) fn reanchor(&mut self, saved: &[String]) {
-        if let Some(first) = self.frozen.as_ref().and_then(|rows| rows.first()) {
-            let key = first.iter().map(Cell::symbol).collect::<String>();
-            let normal = |line: &str| line.trim().trim_start_matches(['⏺', '❯']).trim().to_owned();
-            if let Some(index) = saved.iter().rposition(|line| normal(line) == normal(&key)) {
-                self.saved_prefix = index;
-            }
-        }
+        let Some(rows) = self.frozen.as_ref() else {
+            return;
+        };
+        let normal = |line: &str| line.trim().trim_start_matches(['⏺', '❯']).trim().to_owned();
+        let saved_keys: Vec<_> = saved.iter().map(|line| normal(line)).collect();
+        let anchor = rows
+            .iter()
+            .enumerate()
+            .take(32)
+            .find_map(|(native_index, row)| {
+                let key = normal(&row.iter().map(Cell::symbol).collect::<String>());
+                // Short answers are valid anchors too. Ignore empty or marker-only rows.
+                if key
+                    .chars()
+                    .all(|ch| ch.is_whitespace() || matches!(ch, '─' | '━' | '✻'))
+                {
+                    return None;
+                }
+                saved_keys
+                    .iter()
+                    .rposition(|line| line == &key)
+                    .map(|saved_index| saved_index.saturating_sub(native_index))
+            });
+        // A missing text match must never make saved messages unreachable. Keep
+        // them before the unchanged native scene. When reflow/styling prevents a
+        // verified overlap this may repeat content at the join, but drops no history.
+        self.awaiting_saved = saved.iter().all(|line| line.trim().is_empty());
+        self.saved_prefix = if self.awaiting_saved {
+            0
+        } else {
+            anchor.unwrap_or(saved.len())
+        };
     }
 
     pub(super) fn resume(&mut self) {
         self.frozen = None;
         self.saved_prefix = 0;
+        self.awaiting_saved = false;
+        self.pending_scroll = 0;
     }
 
     pub(super) fn row_count(&self) -> usize {
@@ -332,7 +347,7 @@ mod continuity_tests {
                 .trim(),
             "row one"
         );
-        live.freeze(&[]);
+        live.freeze(&[], 0);
         let frozen = live.frozen.clone();
         live.update(Buffer::with_lines([
             "row three",
@@ -359,7 +374,7 @@ mod continuity_tests {
             "⏺ native answer line alpha".into(),
             "native answer line beta".into(),
         ];
-        live.freeze(&saved);
+        live.freeze(&saved, 0);
         assert_eq!(live.saved_prefix, 1);
         assert_eq!(live.row_count(), 3);
         assert!(live.row(0).is_none());
@@ -378,5 +393,27 @@ mod continuity_tests {
         };
         live.update(Buffer::with_lines(["x".repeat(100)]));
         assert_eq!(live.retained.len(), MAX_RETAINED_CELLS / 100);
+    }
+    #[test]
+    fn unmatched_history_and_short_replies_remain_scrollable_without_a_scene_swap() {
+        let mut live = LiveSurface::default();
+        live.update(Buffer::with_lines(["OK"]));
+        let saved = vec!["old message".into(), "unmatched wrapped content".into()];
+        live.freeze(&saved, 10);
+        assert_eq!(live.saved_prefix, 2);
+        assert_eq!(live.row_count(), 12);
+        assert_eq!(
+            live.row(2)
+                .unwrap()
+                .iter()
+                .map(Cell::symbol)
+                .collect::<String>(),
+            "OK"
+        );
+        assert!(live
+            .row(3)
+            .unwrap()
+            .iter()
+            .all(|cell| cell.symbol().trim().is_empty()));
     }
 }

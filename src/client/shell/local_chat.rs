@@ -186,13 +186,28 @@ impl LocalChat {
         if self.live_surface.body.is_some() {
             if delta > 0 {
                 self.reading_history = true;
-                self.live_surface.freeze(&self.wrapped);
+                let saved = if self.transcript.loaded {
+                    self.wrapped.as_slice()
+                } else {
+                    &[]
+                };
+                self.live_surface.freeze(saved, self.viewport_rows);
             }
-            self.offset = self.offset.saturating_add_signed(delta).min(
+            let requested = self.offset.saturating_add_signed(delta);
+            self.offset = requested.min(
                 self.live_surface
                     .row_count()
                     .saturating_sub(self.viewport_rows),
             );
+            if delta > 0 && self.live_surface.awaiting_saved {
+                self.live_surface.pending_scroll = self
+                    .live_surface
+                    .pending_scroll
+                    .saturating_add(requested.saturating_sub(self.offset));
+                self.transcript.next = None;
+            } else if delta < 0 {
+                self.live_surface.pending_scroll = 0;
+            }
             if delta < 0 && self.offset == 0 {
                 self.resume_live();
             }
