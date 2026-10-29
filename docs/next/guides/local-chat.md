@@ -16,8 +16,8 @@ History comes from the selected Claude process's saved conversation, including m
 this client opened. Binding uses the current endpoint, pane and actual process session; it never guesses
 from a project's newest file. Diagnostic API request/response copies, internal context and sidechain logs
 are not shown as main conversation turns. User messages, Claude replies, code blocks, tool results and
-errors use the current theme's semantic colors. This is a structured conversation view, not a pixel-perfect
-copy of the terminal's ANSI appearance.
+errors in older saved history use the current theme's semantic colors. Latest output preserves the
+received native terminal cells and colors, excluding Claude's remote composer and status footer.
 
 Reads run in the background for only the active pane, normally at most once per second. Unchanged
 files do not retransmit content. Each page scans at most 2 MiB of logs and returns 1 MiB of text. The
@@ -25,11 +25,18 @@ local window retains at most 8 MiB or 10,000 content blocks; earlier pages remai
 window fills. Tool results display at most 64 KiB, and oversized content blocks are explicitly marked.
 Images use placeholders; view originals in the terminal. Drafts are limited to 64 KiB.
 
-Unsaved output appears separately in a small **Live terminal** preview and never enters saved history.
-The preview hides while reading upward. An agent needing confirmation shows **Needs attention · Esc terminal**.
-Unavailable history is explicit and retains the original terminal entry point. The fallback screen cache
-is limited to 2,000 lines / 1 MiB and does not claim to contain the whole conversation. Drafts and caches
-stay in client memory; no extra conversation file is written.
+Latest output streams from the already-received native terminal frames, at most ten updates per second;
+it does not wait for a completed assistant record. Sending keeps this scene visible and adds local
+submission feedback. Wheel/PageUp freezes and scrolls the same cached cells; Ctrl+End resumes following.
+Earlier saved rows join before the native scene. Matching rows remove overlap; when reflow prevents
+reliable matching, all saved history remains reachable and some content can repeat at the join.
+A scroll requested before the first history read completes is applied when that history arrives.
+
+The native cache retains at most 200,000 prior cells plus the current scene and a frozen reading copy.
+A blocked agent shows **Needs attention · Esc terminal**; use the original terminal to answer it.
+Unavailable history is explicit and retains the original terminal entry point. The legacy fallback screen
+cache is limited to 2,000 lines / 1 MiB. Drafts and caches stay in client memory; no extra conversation
+file is written.
 
 The read-only provider uses Python 3.9+ standard libraries on the source host, resolves the actual Claude
 process through Herdr's public API, and verifies its session metadata and process-start identity. Claude
@@ -55,6 +62,6 @@ terminal-cell PNG/text captures and JSON results; see `--help` for dependencies 
 
 The submitted text appears immediately in a separate local message with a sending indicator. A remote acknowledgement changes it to sent; the saved user record replaces it without a duplicate. Unconfirmed sends return to the draft and are never automatically retried. Up to 16 messages may await history synchronization; beyond that the draft is retained.
 
-Live terminal previews reuse already-received surface cells instead of sharing the command queue with passive reads. Saved-history polling temporarily runs up to four times per second while a submission awaits synchronization, with only one read in flight. Remote submission still includes the agent paste/Enter delay and network transit; local echo is not evidence of a Claude reply.
+Live terminal output reuses already-received surface cells instead of sharing the command queue with passive reads. Saved-history polling temporarily runs up to four times per second while a submission awaits synchronization, with only one read in flight. Remote submission still includes the agent paste/Enter delay and network transit; local echo is not evidence of a Claude reply.
 
 `python3 scripts/local_chat_preview_e2e.py --help` describes the optional real-SSH checks for cached switching, rapid retargeting, local echo, acknowledgement timing, and reconciliation. Supply a dedicated test session with a ready Claude test agent.
